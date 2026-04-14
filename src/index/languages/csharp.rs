@@ -25,7 +25,14 @@ impl LanguageSupport for CSharpSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -181,7 +188,10 @@ fn extract_named_decl(node: Node, source: &[u8], kind: SymbolKind) -> Option<Ext
     })
 }
 
-#[expect(clippy::only_used_in_recursion, reason = "enclosing is the fallback for unnamed nested declarations")]
+#[expect(
+    clippy::only_used_in_recursion,
+    reason = "enclosing is the fallback for unnamed nested declarations"
+)]
 fn extract_type_body(
     type_node: Node,
     source: &[u8],
@@ -306,7 +316,8 @@ fn record_reference(
     match node.kind() {
         "invocation_expression" => {
             // `Foo.Bar(x)` — first child is the callee expression.
-            if let Some(func) = node.child_by_field_name("function")
+            if let Some(func) = node
+                .child_by_field_name("function")
                 .or_else(|| node.child(0))
             {
                 let name = extract_callee_name(func, source);
@@ -322,11 +333,14 @@ fn record_reference(
         }
         "object_creation_expression" => {
             // `new Foo()` — the type child holds the constructor name.
-            if let Some(type_node) = node.child_by_field_name("type")
-                .or_else(|| children(node).find(|c| {
-                    matches!(c.kind(), "identifier_name" | "generic_name" | "identifier" | "qualified_name")
-                }))
-            {
+            if let Some(type_node) = node.child_by_field_name("type").or_else(|| {
+                children(node).find(|c| {
+                    matches!(
+                        c.kind(),
+                        "identifier_name" | "generic_name" | "identifier" | "qualified_name"
+                    )
+                })
+            }) {
                 let name = extract_type_name(type_node, source);
                 if !name.is_empty() && !is_builtin_type(&name) {
                     references.push(ExtractedReference {
@@ -372,8 +386,12 @@ fn extract_callee_name(node: Node, source: &[u8]) -> String {
         "member_access_expression" => {
             // `obj.Method` — try "name" field, fall back to last identifier child.
             node.child_by_field_name("name")
-                .or_else(|| node.child(node.child_count().saturating_sub(1) as u32)
-                    .filter(|n| matches!(n.kind(), "identifier" | "identifier_name" | "generic_name")))
+                .or_else(|| {
+                    node.child(node.child_count().saturating_sub(1) as u32)
+                        .filter(|n| {
+                            matches!(n.kind(), "identifier" | "identifier_name" | "generic_name")
+                        })
+                })
                 .map(|n| node_text(n, source))
                 .unwrap_or_default()
         }
@@ -441,11 +459,7 @@ fn record_return_type(
 fn is_builtin_callable(name: &str) -> bool {
     matches!(
         name,
-        "ToString"
-            | "Equals"
-            | "GetHashCode"
-            | "GetType"
-            | "ReferenceEquals"
+        "ToString" | "Equals" | "GetHashCode" | "GetType" | "ReferenceEquals"
     )
 }
 
@@ -762,10 +776,7 @@ public class Demo {
             "ToString should be filtered"
         );
         assert!(!ref_names.contains(&"int"), "int should be filtered");
-        assert!(
-            !ref_names.contains(&"string"),
-            "string should be filtered"
-        );
+        assert!(!ref_names.contains(&"string"), "string should be filtered");
     }
 
     #[test]

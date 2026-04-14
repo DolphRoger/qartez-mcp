@@ -101,9 +101,7 @@ fn extract_from_node(
         "lexical_declaration" | "variable_declaration" => {
             let before = symbols.len();
             extract_variable_decl(node, source, symbols);
-            if symbols.len() == before + 1
-                && matches!(symbols[before].kind, SymbolKind::Function)
-            {
+            if symbols.len() == before + 1 && matches!(symbols[before].kind, SymbolKind::Function) {
                 new_enclosing = Some(before);
             }
         }
@@ -123,14 +121,7 @@ fn extract_from_node(
     record_reference(node, source, enclosing, references);
 
     for child in children(node) {
-        extract_from_node(
-            child,
-            source,
-            new_enclosing,
-            symbols,
-            imports,
-            references,
-        );
+        extract_from_node(child, source, new_enclosing, symbols, imports, references);
     }
 }
 
@@ -369,8 +360,11 @@ fn extract_export_statement(
 fn count_complexity(node: Node, source: &[u8]) -> u32 {
     let mut count = 0;
     match node.kind() {
-        "arrow_function" | "function_expression" | "function_declaration"
-        | "generator_function_declaration" | "function" => {
+        "arrow_function"
+        | "function_expression"
+        | "function_declaration"
+        | "generator_function_declaration"
+        | "function" => {
             return 0;
         }
         "if_statement" => count += 1,
@@ -495,14 +489,7 @@ fn extract_class_methods(
                 });
                 if let Some(method_body) = child.child_by_field_name("body") {
                     for grand in children(method_body) {
-                        extract_from_node(
-                            grand,
-                            source,
-                            Some(idx),
-                            symbols,
-                            imports,
-                            references,
-                        );
+                        extract_from_node(grand, source, Some(idx), symbols, imports, references);
                     }
                 }
             }
@@ -548,7 +535,8 @@ fn extract_variable_decl(node: Node, source: &[u8], symbols: &mut Vec<ExtractedS
         };
 
         let complexity = if is_func {
-            value.and_then(|v| v.child_by_field_name("body"))
+            value
+                .and_then(|v| v.child_by_field_name("body"))
                 .map(|body| 1 + count_complexity(body, source))
         } else {
             None
@@ -653,7 +641,11 @@ fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
         return None;
     }
 
-    let truncated = if sig.len() > 200 { &sig[..sig.floor_char_boundary(200)] } else { sig };
+    let truncated = if sig.len() > 200 {
+        &sig[..sig.floor_char_boundary(200)]
+    } else {
+        sig
+    };
     Some(truncated.to_string())
 }
 
@@ -1009,8 +1001,10 @@ class Svc {
             .position(|s| s.name == "run" && matches!(s.kind, SymbolKind::Method))
             .expect("run method");
         assert!(
-            result.references.iter().any(|r| r.name == "helper"
-                && r.from_symbol_idx == Some(run_idx)),
+            result
+                .references
+                .iter()
+                .any(|r| r.name == "helper" && r.from_symbol_idx == Some(run_idx)),
             "helper() inside run should be attributed to run method"
         );
     }

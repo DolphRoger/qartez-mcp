@@ -219,15 +219,12 @@ fn normalize_source(src: &str) -> String {
 
     static RE_BLOCK_COMMENT: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"/\*[\s\S]*?\*/").unwrap());
-    static RE_LINE_COMMENT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"//[^\n]*").unwrap());
-    static RE_STRING: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#""([^"\\]|\\.)*"|'([^'\\]|\\.)*'|`([^`\\]|\\.)*`"#).unwrap()
-    });
+    static RE_LINE_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//[^\n]*").unwrap());
+    static RE_STRING: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#""([^"\\]|\\.)*"|'([^'\\]|\\.)*'|`([^`\\]|\\.)*`"#).unwrap());
     static RE_NUMBER: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\b\d[\d_.]*[a-zA-Z]*\b").unwrap());
-    static RE_IDENT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\b[a-zA-Z_]\w*\b").unwrap());
+    static RE_IDENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[a-zA-Z_]\w*\b").unwrap());
     static RE_WS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
     let s = RE_BLOCK_COMMENT.replace_all(src, "");

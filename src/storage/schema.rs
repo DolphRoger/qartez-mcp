@@ -125,8 +125,7 @@ CREATE TABLE IF NOT EXISTS file_clusters (
 const CREATE_IDX_FILE_CLUSTERS_CLUSTER: &str =
     "CREATE INDEX IF NOT EXISTS idx_file_clusters_cluster ON file_clusters(cluster_id)";
 
-const CREATE_IDX_SYMBOLS_SHAPE_HASH: &str =
-    "CREATE INDEX IF NOT EXISTS idx_symbols_shape_hash ON symbols(shape_hash) WHERE shape_hash IS NOT NULL";
+const CREATE_IDX_SYMBOLS_SHAPE_HASH: &str = "CREATE INDEX IF NOT EXISTS idx_symbols_shape_hash ON symbols(shape_hash) WHERE shape_hash IS NOT NULL";
 
 pub fn create_schema(conn: &Connection) -> Result<()> {
     // Phase 1: create tables (IF NOT EXISTS). Idempotent on existing DBs.
@@ -209,10 +208,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     // Per-symbol cyclomatic complexity. NULL for non-function symbols or
     // languages that do not extract control-flow information.
-    try_add_column(
-        conn,
-        "ALTER TABLE symbols ADD COLUMN complexity INTEGER",
-    )?;
+    try_add_column(conn, "ALTER TABLE symbols ADD COLUMN complexity INTEGER")?;
     // Per-file git change count — how many commits touched this file within
     // the configured analysis window. Defaults to 0 for non-git repos or
     // files that appear only in the working tree.
@@ -313,7 +309,9 @@ mod tests {
         )
         .unwrap();
         let pr: f64 = conn
-            .query_row("SELECT pagerank FROM symbols WHERE name = 'f'", [], |r| r.get(0))
+            .query_row("SELECT pagerank FROM symbols WHERE name = 'f'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(pr, 0.0);
     }
@@ -336,8 +334,12 @@ mod tests {
             )
             .unwrap();
         }
-        let a_id: i64 = conn.query_row("SELECT id FROM symbols WHERE name='a'", [], |r| r.get(0)).unwrap();
-        let b_id: i64 = conn.query_row("SELECT id FROM symbols WHERE name='b'", [], |r| r.get(0)).unwrap();
+        let a_id: i64 = conn
+            .query_row("SELECT id FROM symbols WHERE name='a'", [], |r| r.get(0))
+            .unwrap();
+        let b_id: i64 = conn
+            .query_row("SELECT id FROM symbols WHERE name='b'", [], |r| r.get(0))
+            .unwrap();
 
         conn.execute(
             "INSERT INTO symbol_refs (from_symbol_id, to_symbol_id, kind) VALUES (?1, ?2, 'call')",
@@ -402,7 +404,9 @@ mod tests {
         )
         .unwrap();
         let pr: f64 = conn
-            .query_row("SELECT pagerank FROM symbols WHERE name = 'g'", [], |r| r.get(0))
+            .query_row("SELECT pagerank FROM symbols WHERE name = 'g'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(pr, 0.0);
     }

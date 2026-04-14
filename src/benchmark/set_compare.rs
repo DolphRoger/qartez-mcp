@@ -283,7 +283,9 @@ fn extract_definition_from_source(line: &str) -> Option<String> {
     let trimmed = line.trim().trim_start_matches("pub ");
     let trimmed = trimmed.trim_start_matches("pub(crate) ");
 
-    for keyword in &["fn ", "struct ", "enum ", "trait ", "const ", "type ", "static "] {
+    for keyword in &[
+        "fn ", "struct ", "enum ", "trait ", "const ", "type ", "static ",
+    ] {
         if let Some(rest) = trimmed.strip_prefix(keyword) {
             let name = rest
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -365,10 +367,7 @@ fn skip_file_line_prefix(line: &str) -> &str {
 /// Returns true if the string looks like a file path.
 fn looks_like_path(s: &str) -> bool {
     let s = s.trim();
-    (s.contains('/') || s.contains('.'))
-        && !s.starts_with("//")
-        && !s.contains(' ')
-        && s.len() > 2
+    (s.contains('/') || s.contains('.')) && !s.starts_with("//") && !s.contains(' ') && s.len() > 2
 }
 
 /// Normalizes a file path by trimming whitespace and leading `./`.

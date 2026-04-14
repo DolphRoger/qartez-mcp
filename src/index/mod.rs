@@ -221,8 +221,7 @@ fn resolve_symbol_references(
 ) -> Result<()> {
     // (name -> [(symbol_id, file_id)]) built once for the whole project.
     let all_syms = read::get_all_symbols_with_path(conn)?;
-    let mut name_index: HashMap<String, Vec<(i64, i64)>> =
-        HashMap::with_capacity(all_syms.len());
+    let mut name_index: HashMap<String, Vec<(i64, i64)>> = HashMap::with_capacity(all_syms.len());
     for (sym, _path) in &all_syms {
         name_index
             .entry(sym.name.clone())
@@ -238,7 +237,9 @@ fn resolve_symbol_references(
 
     for entry in indexed {
         let empty_imports = HashSet::new();
-        let imported = imports_by_file.get(&entry.file_id).unwrap_or(&empty_imports);
+        let imported = imports_by_file
+            .get(&entry.file_id)
+            .unwrap_or(&empty_imports);
 
         for reference in &entry.references {
             // Module-scope references (no enclosing symbol) are dropped in
@@ -1351,8 +1352,7 @@ mod tests {
 
         let refs = symbol_ref_names(&conn);
         assert!(
-            refs.iter()
-                .any(|(f, t)| f == "caller" && t == "helper"),
+            refs.iter().any(|(f, t)| f == "caller" && t == "helper"),
             "expected (caller -> helper) edge, got {:?}",
             refs
         );
@@ -1373,19 +1373,14 @@ mod tests {
              pub fn run() { do_work(); }\n",
         )
         .unwrap();
-        fs::write(
-            src.join("helper.rs"),
-            "pub fn do_work() {}\n",
-        )
-        .unwrap();
+        fs::write(src.join("helper.rs"), "pub fn do_work() {}\n").unwrap();
 
         let conn = storage::open_in_memory().unwrap();
         full_index(&conn, root, false).unwrap();
 
         let refs = symbol_ref_names(&conn);
         assert!(
-            refs.iter()
-                .any(|(f, t)| f == "run" && t == "do_work"),
+            refs.iter().any(|(f, t)| f == "run" && t == "do_work"),
             "expected (run -> do_work) edge across files, got {:?}",
             refs
         );
@@ -1432,8 +1427,7 @@ mod tests {
 
         let refs = symbol_ref_names(&conn);
         assert!(
-            refs.iter()
-                .any(|(f, t)| f == "caller" && t == "helper"),
+            refs.iter().any(|(f, t)| f == "caller" && t == "helper"),
             "expected (caller -> helper) edge for Python, got {:?}",
             refs
         );
@@ -1453,25 +1447,19 @@ mod tests {
         fs::write(src.join("b.rs"), "pub fn common() {}\n").unwrap();
         // `c.rs` calls common but does not `use` either module, so neither
         // definition is in the imports-by-file set.
-        fs::write(
-            src.join("c.rs"),
-            "pub fn caller() { common(); }\n",
-        )
-        .unwrap();
+        fs::write(src.join("c.rs"), "pub fn caller() { common(); }\n").unwrap();
         // Crate root binding modules so they get indexed (not strictly
         // required but avoids the "unreachable file" warning noise).
-        fs::write(
-            src.join("lib.rs"),
-            "pub mod a;\npub mod b;\npub mod c;\n",
-        )
-        .unwrap();
+        fs::write(src.join("lib.rs"), "pub mod a;\npub mod b;\npub mod c;\n").unwrap();
 
         let conn = storage::open_in_memory().unwrap();
         full_index(&conn, root, false).unwrap();
 
         let refs = symbol_ref_names(&conn);
-        let caller_to_common: Vec<&(String, String)> =
-            refs.iter().filter(|(f, t)| f == "caller" && t == "common").collect();
+        let caller_to_common: Vec<&(String, String)> = refs
+            .iter()
+            .filter(|(f, t)| f == "caller" && t == "common")
+            .collect();
         assert!(
             caller_to_common.is_empty(),
             "ambiguous global `common` should not resolve, got {:?}",
@@ -1494,13 +1482,7 @@ mod tests {
 
         // Add a new file and run incremental index.
         fs::write(src.join("new.rs"), "pub fn world() {}\n").unwrap();
-        incremental_index(
-            &conn,
-            root,
-            &[src.join("new.rs")],
-            &[],
-        )
-        .unwrap();
+        incremental_index(&conn, root, &[src.join("new.rs")], &[]).unwrap();
 
         let file = read::get_file_by_path(&conn, "src/new.rs").unwrap();
         assert!(file.is_some(), "new file must appear in the index");
@@ -1520,7 +1502,9 @@ mod tests {
         let conn = storage::open_in_memory().unwrap();
         full_index(&conn, root, false).unwrap();
 
-        let old_file = read::get_file_by_path(&conn, "src/lib.rs").unwrap().unwrap();
+        let old_file = read::get_file_by_path(&conn, "src/lib.rs")
+            .unwrap()
+            .unwrap();
         let old_id = old_file.id;
 
         // Modify the file.
@@ -1529,17 +1513,16 @@ mod tests {
             "pub fn hello() {}\npub fn goodbye() {}\n",
         )
         .unwrap();
-        incremental_index(
-            &conn,
-            root,
-            &[src.join("lib.rs")],
-            &[],
-        )
-        .unwrap();
+        incremental_index(&conn, root, &[src.join("lib.rs")], &[]).unwrap();
 
-        let new_file = read::get_file_by_path(&conn, "src/lib.rs").unwrap().unwrap();
+        let new_file = read::get_file_by_path(&conn, "src/lib.rs")
+            .unwrap()
+            .unwrap();
         // File id must be preserved (clear_file_content + upsert, not delete+insert).
-        assert_eq!(new_file.id, old_id, "file_id must be stable across incremental updates");
+        assert_eq!(
+            new_file.id, old_id,
+            "file_id must be stable across incremental updates"
+        );
         let syms = read::get_symbols_for_file(&conn, new_file.id).unwrap();
         assert_eq!(syms.len(), 2);
     }
@@ -1556,20 +1539,20 @@ mod tests {
         let conn = storage::open_in_memory().unwrap();
         full_index(&conn, root, false).unwrap();
 
-        assert!(read::get_file_by_path(&conn, "src/old.rs").unwrap().is_some());
+        assert!(
+            read::get_file_by_path(&conn, "src/old.rs")
+                .unwrap()
+                .is_some()
+        );
 
         // Delete the file on disk, then tell incremental it was deleted.
         fs::remove_file(src.join("old.rs")).unwrap();
-        incremental_index(
-            &conn,
-            root,
-            &[],
-            &[src.join("old.rs")],
-        )
-        .unwrap();
+        incremental_index(&conn, root, &[], &[src.join("old.rs")]).unwrap();
 
         assert!(
-            read::get_file_by_path(&conn, "src/old.rs").unwrap().is_none(),
+            read::get_file_by_path(&conn, "src/old.rs")
+                .unwrap()
+                .is_none(),
             "deleted file must be removed from the index"
         );
     }
@@ -1581,11 +1564,7 @@ mod tests {
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         // a.rs imports b via `use crate::b;`
-        fs::write(
-            src.join("lib.rs"),
-            "pub mod a;\npub mod b;\n",
-        )
-        .unwrap();
+        fs::write(src.join("lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
         fs::write(
             src.join("a.rs"),
             "use crate::b;\npub fn caller() { b::helper(); }\n",
@@ -1611,13 +1590,7 @@ mod tests {
             "pub fn helper() {}\npub fn helper2() {}\n",
         )
         .unwrap();
-        incremental_index(
-            &conn,
-            root,
-            &[src.join("b.rs")],
-            &[],
-        )
-        .unwrap();
+        incremental_index(&conn, root, &[src.join("b.rs")], &[]).unwrap();
 
         let incoming_after: i64 = conn
             .query_row(

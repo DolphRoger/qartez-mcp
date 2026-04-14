@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must always use LF (CRLF breaks shebang on WSL/Linux)
+*.sh text eol=lf
+Makefile text eol=lf

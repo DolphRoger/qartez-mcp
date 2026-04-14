@@ -25,7 +25,14 @@ impl LanguageSupport for PhpSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,

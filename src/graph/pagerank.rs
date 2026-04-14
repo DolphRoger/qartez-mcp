@@ -368,8 +368,7 @@ mod tests {
         ];
         let ids = write::insert_symbols(&conn, file_id, &inserts).unwrap();
         let (hub, leaves) = (ids[0], &ids[1..]);
-        let edges: Vec<(i64, i64, &str)> =
-            leaves.iter().map(|&leaf| (leaf, hub, "call")).collect();
+        let edges: Vec<(i64, i64, &str)> = leaves.iter().map(|&leaf| (leaf, hub, "call")).collect();
         write::insert_symbol_refs(&conn, &edges).unwrap();
 
         compute_symbol_pagerank(&conn, &PageRankConfig::default()).unwrap();
@@ -381,11 +380,9 @@ mod tests {
             .unwrap();
         for &leaf in leaves {
             let leaf_rank: f64 = conn
-                .query_row(
-                    "SELECT pagerank FROM symbols WHERE id = ?1",
-                    [leaf],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT pagerank FROM symbols WHERE id = ?1", [leaf], |r| {
+                    r.get(0)
+                })
                 .unwrap();
             assert!(
                 hub_rank > leaf_rank,

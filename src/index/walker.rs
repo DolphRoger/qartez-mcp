@@ -33,10 +33,11 @@ pub fn walk_source_files(root: &Path) -> Vec<PathBuf> {
 
         // Extension-based match (existing behavior)
         if let Some(ext) = path.extension().and_then(|e| e.to_str())
-            && supported_ext.contains(ext) {
-                files.push(path.to_path_buf());
-                continue;
-            }
+            && supported_ext.contains(ext)
+        {
+            files.push(path.to_path_buf());
+            continue;
+        }
 
         // Filename-based match for extensionless files (Dockerfile, Makefile, etc.)
         if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {

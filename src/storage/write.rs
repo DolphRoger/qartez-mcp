@@ -133,10 +133,7 @@ pub fn clear_file_content(conn: &Connection, file_id: i64) -> Result<()> {
         "DELETE FROM symbols_body_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
         [file_id],
     )?;
-    conn.execute(
-        "DELETE FROM unused_exports WHERE file_id = ?1",
-        [file_id],
-    )?;
+    conn.execute("DELETE FROM unused_exports WHERE file_id = ?1", [file_id])?;
     // symbol_refs cascade from symbols(id) ON DELETE CASCADE.
     conn.execute("DELETE FROM symbols WHERE file_id = ?1", [file_id])?;
     // Only outgoing edges — incoming edges stay so other files' import
@@ -551,23 +548,18 @@ mod tests {
         )
         .unwrap();
         let caller: i64 = conn
-            .query_row(
-                "SELECT id FROM symbols WHERE name = 'caller'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let callee: i64 = conn
-            .query_row(
-                "SELECT id FROM symbols WHERE name = 'callee'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM symbols WHERE name = 'callee'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
 
         // First insert succeeds; duplicate `(from, to, kind)` is silently ignored.
-        insert_symbol_refs(&conn, &[(caller, callee, "call"), (caller, callee, "call")])
-            .unwrap();
+        insert_symbol_refs(&conn, &[(caller, callee, "call"), (caller, callee, "call")]).unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM symbol_refs", [], |r| r.get(0))
             .unwrap();
@@ -608,9 +600,11 @@ mod tests {
 
         update_symbol_pagerank(&conn, sym_id, 0.42).unwrap();
         let pr: f64 = conn
-            .query_row("SELECT pagerank FROM symbols WHERE id = ?1", [sym_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT pagerank FROM symbols WHERE id = ?1",
+                [sym_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!((pr - 0.42).abs() < f64::EPSILON);
     }

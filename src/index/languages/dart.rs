@@ -88,9 +88,10 @@ fn extract_from_node(
         }
         "function_signature" => {
             if is_top_level(node)
-                && let Some(sym) = extract_function(node, source) {
-                    symbols.push(sym);
-                }
+                && let Some(sym) = extract_function(node, source)
+            {
+                symbols.push(sym);
+            }
             return;
         }
         "import_or_export" => {
@@ -134,9 +135,10 @@ fn is_top_level(node: Node) -> bool {
 
 fn resolve_variable_kind(node: Node) -> SymbolKind {
     if let Some(prev) = node.prev_sibling()
-        && prev.kind() == "const" {
-            return SymbolKind::Const;
-        }
+        && prev.kind() == "const"
+    {
+        return SymbolKind::Const;
+    }
     SymbolKind::Variable
 }
 
@@ -259,8 +261,8 @@ fn extract_class_body(
     class_idx: usize,
     symbols: &mut Vec<ExtractedSymbol>,
 ) {
-    let body = children(class_node)
-        .find(|c| c.kind() == "class_body" || c.kind() == "extension_body");
+    let body =
+        children(class_node).find(|c| c.kind() == "class_body" || c.kind() == "extension_body");
     let body = match body {
         Some(b) => b,
         None => return,
@@ -275,11 +277,7 @@ fn extract_class_body(
     }
 }
 
-fn extract_member(
-    member: Node,
-    source: &[u8],
-    parent_idx: usize,
-) -> Option<ExtractedSymbol> {
+fn extract_member(member: Node, source: &[u8], parent_idx: usize) -> Option<ExtractedSymbol> {
     for child in children(member) {
         match child.kind() {
             "method_signature" => {
@@ -288,7 +286,9 @@ fn extract_member(
             "declaration" => {
                 for inner in children(child) {
                     match inner.kind() {
-                        "function_signature" | "getter_signature" | "setter_signature"
+                        "function_signature"
+                        | "getter_signature"
+                        | "setter_signature"
                         | "constructor_signature" => {
                             let name_node = inner.child_by_field_name("name")?;
                             let name = node_text(name_node, source);
@@ -330,8 +330,11 @@ fn extract_method_from_signature(
 ) -> Option<ExtractedSymbol> {
     for child in children(sig_node) {
         match child.kind() {
-            "function_signature" | "getter_signature" | "setter_signature"
-            | "constructor_signature" | "factory_constructor_signature" => {
+            "function_signature"
+            | "getter_signature"
+            | "setter_signature"
+            | "constructor_signature"
+            | "factory_constructor_signature" => {
                 let name_node = child.child_by_field_name("name")?;
                 let name = node_text(name_node, source);
                 if name.is_empty() {
@@ -428,11 +431,7 @@ fn extract_variable_list(
     }
 }
 
-fn extract_initialized_list(
-    node: Node,
-    source: &[u8],
-    symbols: &mut Vec<ExtractedSymbol>,
-) {
+fn extract_initialized_list(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbol>) {
     for child in children(node) {
         if child.kind() == "initialized_identifier" {
             let name_node = children(child).find(|c| c.kind() == "identifier");
@@ -643,13 +642,25 @@ final appName = 'MyApp';
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Animal"), "missing Animal, got {names:?}");
         assert!(names.contains(&"Dog"), "missing Dog, got {names:?}");
-        assert!(names.contains(&"Swimming"), "missing Swimming, got {names:?}");
+        assert!(
+            names.contains(&"Swimming"),
+            "missing Swimming, got {names:?}"
+        );
         assert!(names.contains(&"Color"), "missing Color, got {names:?}");
-        assert!(names.contains(&"StringExt"), "missing StringExt, got {names:?}");
+        assert!(
+            names.contains(&"StringExt"),
+            "missing StringExt, got {names:?}"
+        );
         assert!(names.contains(&"IntList"), "missing IntList, got {names:?}");
         assert!(names.contains(&"greet"), "missing greet, got {names:?}");
-        assert!(names.contains(&"_privateHelper"), "missing _privateHelper, got {names:?}");
-        assert!(names.contains(&"maxRetries"), "missing maxRetries, got {names:?}");
+        assert!(
+            names.contains(&"_privateHelper"),
+            "missing _privateHelper, got {names:?}"
+        );
+        assert!(
+            names.contains(&"maxRetries"),
+            "missing maxRetries, got {names:?}"
+        );
         assert!(names.contains(&"appName"), "missing appName, got {names:?}");
 
         let private_fn = result
@@ -673,18 +684,10 @@ final appName = 'MyApp';
             .unwrap();
         assert!(matches!(max_retries.kind, SymbolKind::Const));
 
-        let app_name = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "appName")
-            .unwrap();
+        let app_name = result.symbols.iter().find(|s| s.name == "appName").unwrap();
         assert!(matches!(app_name.kind, SymbolKind::Variable));
 
-        let int_list = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "IntList")
-            .unwrap();
+        let int_list = result.symbols.iter().find(|s| s.name == "IntList").unwrap();
         assert!(matches!(int_list.kind, SymbolKind::Type));
 
         let methods: Vec<_> = result

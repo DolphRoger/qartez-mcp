@@ -481,8 +481,7 @@ pub fn build_scenario_report(
 pub fn fill_effective_savings(report: &mut ScenarioReport) {
     if let Some(ref sc) = report.set_comparison {
         if sc.recall > 0.0 {
-            report.savings.effective_savings_pct =
-                Some(report.savings.tokens_pct * sc.recall);
+            report.savings.effective_savings_pct = Some(report.savings.tokens_pct * sc.recall);
         }
     }
 }
@@ -689,10 +688,7 @@ pub fn render_markdown(report: &BenchmarkReport) -> String {
         ));
     }
 
-    let any_set_comparison = report
-        .scenarios
-        .iter()
-        .any(|s| s.set_comparison.is_some());
+    let any_set_comparison = report.scenarios.iter().any(|s| s.set_comparison.is_some());
     let any_compilation_check = report
         .scenarios
         .iter()
@@ -770,10 +766,11 @@ pub fn render_markdown(report: &BenchmarkReport) -> String {
     // has been judged. Distinguishes LLM-scored (correctness, usability)
     // from programmatic (completeness, groundedness, conciseness) axes.
     if any_quality {
-        let any_batch = report
-            .scenarios
-            .iter()
-            .any(|s| s.quality.as_ref().is_some_and(|q| q.flags.contains(&"batch".to_string())));
+        let any_batch = report.scenarios.iter().any(|s| {
+            s.quality
+                .as_ref()
+                .is_some_and(|q| q.flags.contains(&"batch".to_string()))
+        });
 
         out.push_str("## Quality");
         if any_batch {
@@ -813,7 +810,11 @@ pub fn render_markdown(report: &BenchmarkReport) -> String {
                 "\n† Programmatic (not LLM-scored). Correctness and Usability are LLM-scored via single batch call.\n\
                  Format: MCP/non-MCP.\n",
             );
-            let n = report.scenarios.iter().filter(|s| s.quality.is_some()).count();
+            let n = report
+                .scenarios
+                .iter()
+                .filter(|s| s.quality.is_some())
+                .count();
             out.push_str(&format!(
                 "\nJudge token budget: ~37,000 tokens (1 batch call, {n} scenarios).\n",
             ));
@@ -1840,11 +1841,23 @@ mod tests {
     #[test]
     fn divergence_flag_fires_above_threshold() {
         let rust = BenchmarkReport::new_with_language(
-            vec![dummy_scenario("qartez_deps", "qartez_deps_x", 10, 100, true)],
+            vec![dummy_scenario(
+                "qartez_deps",
+                "qartez_deps_x",
+                10,
+                100,
+                true,
+            )],
             "rust".to_string(),
         );
         let ts = BenchmarkReport::new_with_language(
-            vec![dummy_scenario("qartez_deps", "qartez_deps_x", 99, 100, true)],
+            vec![dummy_scenario(
+                "qartez_deps",
+                "qartez_deps_x",
+                99,
+                100,
+                true,
+            )],
             "typescript".to_string(),
         );
         let summary = render_cross_language_summary(&[
@@ -1857,7 +1870,13 @@ mod tests {
     #[test]
     fn incomplete_rows_render_dash_in_matrix() {
         let rust = BenchmarkReport::new_with_language(
-            vec![dummy_scenario("qartez_deps", "qartez_deps_x", 10, 100, false)],
+            vec![dummy_scenario(
+                "qartez_deps",
+                "qartez_deps_x",
+                10,
+                100,
+                false,
+            )],
             "rust".to_string(),
         );
         let summary = render_cross_language_summary(&[("rust".to_string(), rust)]);
@@ -1978,7 +1997,10 @@ mod tests {
             "rust".to_string(),
         );
         let md = render_markdown(&report);
-        assert!(md.contains("## Session cost context"), "missing section header");
+        assert!(
+            md.contains("## Session cost context"),
+            "missing section header"
+        );
         assert!(md.contains("~20,000 tokens"), "missing base cost");
         assert!(md.contains("empty sessions"), "missing session count");
     }

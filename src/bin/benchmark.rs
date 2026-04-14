@@ -372,43 +372,44 @@ fn main() -> Result<()> {
         runner.run_all_with_tier(&resolved_targets, profile, cli.filter.as_deref(), cli.tier);
     println!("Completed {} scenario(s).", scenarios.len());
 
-    let judge_cache: Option<HashMap<String, judge::CachedJudge>> =
-        if let Some(cache_path) = &cli.reuse_judge {
-            let text = std::fs::read_to_string(cache_path)
-                .with_context(|| format!("read judge cache {}", cache_path.display()))?;
-            let prior: BenchmarkReport =
-                serde_json::from_str(&text).context("parse cached judge benchmark json")?;
-            let current_sha = current_git_sha();
-            let expected = if cli.allow_stale_judge_cache {
-                None
-            } else {
-                current_sha.as_deref()
-            };
-            let cache = judge::build_judge_cache(&prior, expected, cli.allow_stale_judge_cache);
-            if cache.is_empty() {
-                if cli.allow_stale_judge_cache {
-                    eprintln!(
-                        "warning: judge cache at {} contained no usable entries",
-                        cache_path.display()
-                    );
-                } else {
-                    anyhow::bail!(
-                        "judge cache at {} has git SHA {:?} but current is {:?}; pass --allow-stale-judge-cache to force",
-                        cache_path.display(),
-                        prior.git_sha,
-                        current_sha,
-                    );
-                }
-            }
-            println!(
-                "Reusing judge verdicts from {} ({} scenarios cached)",
-                cache_path.display(),
-                cache.len()
-            );
-            Some(cache)
-        } else {
+    let judge_cache: Option<HashMap<String, judge::CachedJudge>> = if let Some(cache_path) =
+        &cli.reuse_judge
+    {
+        let text = std::fs::read_to_string(cache_path)
+            .with_context(|| format!("read judge cache {}", cache_path.display()))?;
+        let prior: BenchmarkReport =
+            serde_json::from_str(&text).context("parse cached judge benchmark json")?;
+        let current_sha = current_git_sha();
+        let expected = if cli.allow_stale_judge_cache {
             None
+        } else {
+            current_sha.as_deref()
         };
+        let cache = judge::build_judge_cache(&prior, expected, cli.allow_stale_judge_cache);
+        if cache.is_empty() {
+            if cli.allow_stale_judge_cache {
+                eprintln!(
+                    "warning: judge cache at {} contained no usable entries",
+                    cache_path.display()
+                );
+            } else {
+                anyhow::bail!(
+                    "judge cache at {} has git SHA {:?} but current is {:?}; pass --allow-stale-judge-cache to force",
+                    cache_path.display(),
+                    prior.git_sha,
+                    current_sha,
+                );
+            }
+        }
+        println!(
+            "Reusing judge verdicts from {} ({} scenarios cached)",
+            cache_path.display(),
+            cache.len()
+        );
+        Some(cache)
+    } else {
+        None
+    };
 
     // Batch judge is the default when --judge is set and --judge-legacy is not.
     let use_batch_judge = cli.judge && !cli.judge_legacy && !cli.judge_ensemble;
@@ -989,7 +990,5 @@ fn print_summary(report: &BenchmarkReport) {
     /// Approximate token overhead of one empty Claude Code session.
     const SESSION_BASE_TOKENS: f64 = 20_000.0;
     let sessions = savings_tokens as f64 / SESSION_BASE_TOKENS;
-    println!(
-        "Session cost context: {savings_tokens} tokens saved ({sessions:.1} empty sessions)"
-    );
+    println!("Session cost context: {savings_tokens} tokens saved ({sessions:.1} empty sessions)");
 }

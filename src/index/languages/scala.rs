@@ -25,7 +25,14 @@ impl LanguageSupport for ScalaSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -188,7 +195,10 @@ fn extract_named_decl(node: Node, source: &[u8], kind: SymbolKind) -> Option<Ext
     })
 }
 
-#[expect(clippy::only_used_in_recursion, reason = "imports/refs collected in nested classes")]
+#[expect(
+    clippy::only_used_in_recursion,
+    reason = "imports/refs collected in nested classes"
+)]
 fn extract_class_body(
     class_node: Node,
     source: &[u8],
@@ -332,7 +342,10 @@ fn record_reference(
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "call_expression" => {
-            if let Some(callee) = node.child_by_field_name("function").or_else(|| node.child(0)) {
+            if let Some(callee) = node
+                .child_by_field_name("function")
+                .or_else(|| node.child(0))
+            {
                 let name = extract_callee_name(callee, source);
                 if !name.is_empty() && !is_builtin_callable(&name) {
                     references.push(ExtractedReference {
@@ -486,7 +499,11 @@ fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
         return None;
     }
 
-    let truncated = if sig.len() > 200 { &sig[..sig.floor_char_boundary(200)] } else { sig };
+    let truncated = if sig.len() > 200 {
+        &sig[..sig.floor_char_boundary(200)]
+    } else {
+        sig
+    };
     Some(truncated.to_string())
 }
 
@@ -529,7 +546,10 @@ mod tests {
         assert!(matches!(result.symbols[0].kind, SymbolKind::Class));
         assert!(result.symbols[0].is_exported);
         let sig = result.symbols[0].signature.as_deref().unwrap_or("");
-        assert!(sig.contains("case class"), "signature should contain 'case class', got: {sig}");
+        assert!(
+            sig.contains("case class"),
+            "signature should contain 'case class', got: {sig}"
+        );
     }
 
     #[test]
@@ -641,13 +661,22 @@ class Service(name: String) {
             .collect();
         assert_eq!(methods.len(), 3);
 
-        let run = methods.iter().find(|m| m.name == "run").expect("run method");
+        let run = methods
+            .iter()
+            .find(|m| m.name == "run")
+            .expect("run method");
         assert!(run.is_exported);
 
-        let internal = methods.iter().find(|m| m.name == "internal").expect("internal method");
+        let internal = methods
+            .iter()
+            .find(|m| m.name == "internal")
+            .expect("internal method");
         assert!(!internal.is_exported);
 
-        let hook = methods.iter().find(|m| m.name == "hook").expect("hook method");
+        let hook = methods
+            .iter()
+            .find(|m| m.name == "hook")
+            .expect("hook method");
         assert!(!hook.is_exported);
     }
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use rmcp::ServiceExt;
 use qartez_mcp::{cli, config, git, graph, index, server, storage, watch};
+use rmcp::ServiceExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

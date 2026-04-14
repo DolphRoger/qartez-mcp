@@ -109,7 +109,11 @@ impl QartezServer {
         Parameters(args): Parameters<SoulArchitectureArgs>,
     ) -> GetPromptResult {
         let top_n_raw = args.top_n.as_deref().unwrap_or("15").trim();
-        let top_n = if top_n_raw.is_empty() { "15" } else { top_n_raw };
+        let top_n = if top_n_raw.is_empty() {
+            "15"
+        } else {
+            top_n_raw
+        };
         let text = format!(
             "Give a one-minute architecture overview of this codebase using Qartez.\n\
              \n\
@@ -127,9 +131,8 @@ impl QartezServer {
              \n\
              Keep it tight — one screenful, no speculation beyond what the tools report."
         );
-        GetPromptResult::new(user_text(text)).with_description(
-            "Qartez architecture overview workflow".to_string(),
-        )
+        GetPromptResult::new(user_text(text))
+            .with_description("Qartez architecture overview workflow".to_string())
     }
 
     /// Debugging workflow: locate, read, and trace a suspect symbol.

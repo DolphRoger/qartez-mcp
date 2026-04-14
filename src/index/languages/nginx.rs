@@ -159,9 +159,10 @@ fn find_inner_value(node: Node, keyword: &str, source: &[u8]) -> Option<String> 
             }
         }
         if child.kind() == "block"
-            && let Some(found) = find_inner_value(child, keyword, source) {
-                return Some(found);
-            }
+            && let Some(found) = find_inner_value(child, keyword, source)
+        {
+            return Some(found);
+        }
     }
     None
 }

@@ -113,7 +113,10 @@ pub fn render_wiki(conn: &Connection, config: &WikiConfig) -> Result<(String, Op
 
     let mut inter: HashMap<(i64, i64), usize> = HashMap::new();
     for (from, to) in edges {
-        let fc = file_to_cluster.get(&from).copied().unwrap_or(MISC_CLUSTER_ID);
+        let fc = file_to_cluster
+            .get(&from)
+            .copied()
+            .unwrap_or(MISC_CLUSTER_ID);
         let tc = file_to_cluster.get(&to).copied().unwrap_or(MISC_CLUSTER_ID);
         if fc == tc {
             continue;
@@ -121,10 +124,7 @@ pub fn render_wiki(conn: &Connection, config: &WikiConfig) -> Result<(String, Op
         *inter.entry((fc, tc)).or_insert(0) += 1;
     }
 
-    let path_to_file: HashMap<&str, i64> = files
-        .iter()
-        .map(|f| (f.path.as_str(), f.id))
-        .collect();
+    let path_to_file: HashMap<&str, i64> = files.iter().map(|f| (f.path.as_str(), f.id)).collect();
     let mut violation_pairs: std::collections::HashSet<(i64, i64)> =
         std::collections::HashSet::new();
     if let Some(violations) = config.boundary_violations.as_ref() {
@@ -135,8 +135,14 @@ pub fn render_wiki(conn: &Connection, config: &WikiConfig) -> Result<(String, Op
             ) else {
                 continue;
             };
-            let fc = file_to_cluster.get(&fid).copied().unwrap_or(MISC_CLUSTER_ID);
-            let tc = file_to_cluster.get(&tid).copied().unwrap_or(MISC_CLUSTER_ID);
+            let fc = file_to_cluster
+                .get(&fid)
+                .copied()
+                .unwrap_or(MISC_CLUSTER_ID);
+            let tc = file_to_cluster
+                .get(&tid)
+                .copied()
+                .unwrap_or(MISC_CLUSTER_ID);
             if fc == tc {
                 continue;
             }
@@ -197,10 +203,7 @@ pub fn render_wiki(conn: &Connection, config: &WikiConfig) -> Result<(String, Op
             ));
         }
         if view.files.len() > cap {
-            out.push_str(&format!(
-                "- ... and {} more\n",
-                view.files.len() - cap
-            ));
+            out.push_str(&format!("- ... and {} more\n", view.files.len() - cap));
         }
         out.push('\n');
 
@@ -282,15 +285,20 @@ fn collect_top_symbols(
         return Ok(Vec::new());
     }
 
-    let placeholders: String = (0..files.len()).map(|i| format!("?{}", i + 1)).collect::<Vec<_>>().join(",");
+    let placeholders: String = (0..files.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT name, file_id, line_start FROM symbols \
          WHERE file_id IN ({placeholders}) AND is_exported = 1"
     );
 
     let file_map: HashMap<i64, &FileRow> = files.iter().map(|f| (f.id, f)).collect();
-    let params: Vec<&dyn rusqlite::types::ToSql> =
-        files.iter().map(|f| &f.id as &dyn rusqlite::types::ToSql).collect();
+    let params: Vec<&dyn rusqlite::types::ToSql> = files
+        .iter()
+        .map(|f| &f.id as &dyn rusqlite::types::ToSql)
+        .collect();
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params.as_slice(), |row| {
@@ -397,9 +405,8 @@ fn disambiguate_labels(views: &mut [ClusterView]) {
             continue;
         }
         *count += 1;
-        let candidate = pick_distinguishing_suffix(&base, view).unwrap_or_else(|| {
-            format!("{}-{}", base, view.id)
-        });
+        let candidate = pick_distinguishing_suffix(&base, view)
+            .unwrap_or_else(|| format!("{}-{}", base, view.id));
         let existing = seen.get(&candidate).copied().unwrap_or(0);
         if existing == 0 {
             seen.insert(candidate.clone(), 1);
@@ -515,7 +522,11 @@ fn format_ymd(epoch_secs: i64) -> String {
 
 fn days_to_ymd(days_since_epoch: i64) -> (i32, u32, u32) {
     let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe as i64 + era * 400;
@@ -574,10 +585,7 @@ mod tests {
 
     #[test]
     fn longest_common_dir_none_when_disjoint() {
-        let files = vec![
-            make_file("src/alpha.rs"),
-            make_file("other/beta.rs"),
-        ];
+        let files = vec![make_file("src/alpha.rs"), make_file("other/beta.rs")];
         assert_eq!(longest_common_dir(&files), None);
     }
 
@@ -590,10 +598,7 @@ mod tests {
             make_file("src/graph/blast.rs"),
             make_file("src/error.rs"),
         ];
-        assert_eq!(
-            modal_subdirectory(&files),
-            Some("src/storage".to_string())
-        );
+        assert_eq!(modal_subdirectory(&files), Some("src/storage".to_string()));
     }
 
     #[test]
@@ -604,10 +609,7 @@ mod tests {
             make_file("src/graph/c.rs"),
             make_file("src/graph/d.rs"),
         ];
-        assert_eq!(
-            modal_subdirectory(&files),
-            Some("src/graph".to_string())
-        );
+        assert_eq!(modal_subdirectory(&files), Some("src/graph".to_string()));
     }
 
     #[test]
@@ -640,14 +642,10 @@ mod tests {
         let conn = setup();
         let f_a = write::upsert_file(&conn, "src/auth/login.rs", 1000, 100, "rust", 10).unwrap();
         let f_b = write::upsert_file(&conn, "src/auth/token.rs", 1000, 100, "rust", 10).unwrap();
-        let f_c =
-            write::upsert_file(&conn, "src/auth/session.rs", 1000, 100, "rust", 10).unwrap();
-        let f_d =
-            write::upsert_file(&conn, "src/storage/blob.rs", 1000, 100, "rust", 10).unwrap();
-        let f_e =
-            write::upsert_file(&conn, "src/storage/index.rs", 1000, 100, "rust", 10).unwrap();
-        let f_f =
-            write::upsert_file(&conn, "src/storage/cache.rs", 1000, 100, "rust", 10).unwrap();
+        let f_c = write::upsert_file(&conn, "src/auth/session.rs", 1000, 100, "rust", 10).unwrap();
+        let f_d = write::upsert_file(&conn, "src/storage/blob.rs", 1000, 100, "rust", 10).unwrap();
+        let f_e = write::upsert_file(&conn, "src/storage/index.rs", 1000, 100, "rust", 10).unwrap();
+        let f_f = write::upsert_file(&conn, "src/storage/cache.rs", 1000, 100, "rust", 10).unwrap();
 
         write::update_pagerank(&conn, f_a, 0.3).unwrap();
         write::update_pagerank(&conn, f_b, 0.2).unwrap();

@@ -80,24 +80,19 @@ The result: your AI works faster, uses fewer tokens, refactors safely, and stops
 
 ## Quickstart
 
-Three commands. Under two minutes.
+Three commands. Under two minutes. No prerequisites needed — the installer handles everything.
 
 ```bash
 git clone https://github.com/kuberstar/qartez-mcp.git
 cd qartez-mcp
-make deploy
+./install.sh
 ```
 
-`make deploy` builds the release binaries, installs them to `~/.local/bin/`, runs the test suite, and launches the `qartez-setup` wizard in non-interactive mode - it auto-detects every MCP-capable IDE on your machine and configures them all in one pass, including the modification-guard hooks for Claude Code.
+The installer checks for Rust (installs via [rustup](https://rustup.rs/) if missing), builds the release binaries, runs the test suite, installs them to `~/.local/bin/`, and launches `qartez-setup` in non-interactive mode - it auto-detects every MCP-capable IDE on your machine and configures them all in one pass, including the modification-guard hooks for Claude Code.
 
-**Then, in any project you want to index:**
+If you have `make` installed, `make deploy` does the same thing.
 
-```bash
-cd /path/to/your/project
-qartez-mcp --reindex
-```
-
-Done. Your AI assistant now has structural understanding of the entire codebase, and the file watcher keeps the index fresh as you edit.
+Open any project in your IDE - Qartez indexes it automatically on session start. No manual step needed. The file watcher keeps the index fresh as you edit.
 
 ### Works with 7 editors and agents
 
@@ -422,22 +417,21 @@ Smaller projects in the same space, sorted by stars:
 
 ## Installation
 
-### Prerequisites
-
-- [Rust toolchain](https://rustup.rs/) (stable, edition 2024)
-- [jq](https://jqlang.github.io/jq/) - used by the Makefile for version discovery
-
 ### One-shot deploy
 
 ```bash
 git clone https://github.com/kuberstar/qartez-mcp.git
 cd qartez-mcp
-make deploy
+./install.sh
 ```
 
-This runs tests, builds the three release binaries (`qartez-mcp`, `qartez-guard`, `qartez-setup`), installs them to `~/.local/bin/`, and configures every detected IDE non-interactively via `qartez-setup --yes` - including hooks, MCP server registration, and the `CLAUDE.md` snippet for Claude Code.
+The installer handles everything: installs Rust via [rustup](https://rustup.rs/) if missing, builds the three release binaries (`qartez-mcp`, `qartez-guard`, `qartez-setup`), installs them to `~/.local/bin/`, runs the test suite, and configures every detected IDE non-interactively via `qartez-setup --yes` - including hooks, MCP server registration, and the `CLAUDE.md` snippet for Claude Code.
+
+`make deploy` does the same thing if you have `make` installed.
 
 Restart your IDEs after install.
+
+> **Windows:** Use [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install) and run the commands above inside your WSL terminal. Native Windows is not supported.
 
 ### Interactive install
 
@@ -469,9 +463,10 @@ Every install path is idempotent and backs up the existing config.
 
 ### Enable Qartez in a project
 
+Qartez indexes automatically on session start — just open a project in your IDE. For manual re-indexing:
+
 ```bash
-cd /path/to/your/project
-qartez-mcp --reindex
+qartez-mcp --root /path/to/your/project --reindex
 ```
 
 ### Claude Desktop (manual)

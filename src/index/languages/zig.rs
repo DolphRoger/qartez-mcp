@@ -173,12 +173,13 @@ fn extract_variable_declaration(
         Some("field_expression") => {
             let rhs_node = rhs.unwrap();
             if let Some(inner) = find_builtin_function_in_field_expr(rhs_node)
-                && is_import_call(inner, source) {
-                    if let Some(imp) = extract_import(inner, source) {
-                        imports.push(imp);
-                    }
-                    return;
+                && is_import_call(inner, source)
+            {
+                if let Some(imp) = extract_import(inner, source) {
+                    imports.push(imp);
                 }
+                return;
+            }
             let kind = if has_const_keyword(node) {
                 SymbolKind::Const
             } else {
@@ -414,8 +415,7 @@ mod tests {
 
     #[test]
     fn test_enum_definition() {
-        let result =
-            parse_zig("pub const Color = enum {\n    red,\n    green,\n    blue,\n};\n");
+        let result = parse_zig("pub const Color = enum {\n    red,\n    green,\n    blue,\n};\n");
         assert_eq!(result.symbols.len(), 1);
         assert_eq!(result.symbols[0].name, "Color");
         assert!(matches!(result.symbols[0].kind, SymbolKind::Enum));
@@ -485,9 +485,8 @@ mod tests {
 
     #[test]
     fn test_union_definition() {
-        let result = parse_zig(
-            "pub const Token = union(enum) {\n    int: i32,\n    float: f64,\n};\n",
-        );
+        let result =
+            parse_zig("pub const Token = union(enum) {\n    int: i32,\n    float: f64,\n};\n");
         assert_eq!(result.symbols.len(), 1);
         assert_eq!(result.symbols[0].name, "Token");
         assert!(matches!(result.symbols[0].kind, SymbolKind::Struct));
@@ -496,8 +495,7 @@ mod tests {
 
     #[test]
     fn test_error_set() {
-        let result =
-            parse_zig("pub const MyError = error{OutOfMemory, InvalidInput};\n");
+        let result = parse_zig("pub const MyError = error{OutOfMemory, InvalidInput};\n");
         assert_eq!(result.symbols.len(), 1);
         assert_eq!(result.symbols[0].name, "MyError");
         assert!(matches!(result.symbols[0].kind, SymbolKind::Enum));

@@ -591,7 +591,7 @@ fn elision_budget_zero_minimal_output() {
             shape_hash: None,
             parent_id: None,
             pagerank: 0.0,
-        complexity: None,
+            complexity: None,
         },
         crate::storage::models::SymbolRow {
             id: 2,
@@ -605,7 +605,7 @@ fn elision_budget_zero_minimal_output() {
             shape_hash: None,
             parent_id: None,
             pagerank: 0.0,
-        complexity: None,
+            complexity: None,
         },
     ];
 
@@ -637,7 +637,7 @@ fn elision_gap_marker_between_symbols() {
             shape_hash: None,
             parent_id: None,
             pagerank: 0.0,
-        complexity: None,
+            complexity: None,
         },
         crate::storage::models::SymbolRow {
             id: 2,
@@ -651,7 +651,7 @@ fn elision_gap_marker_between_symbols() {
             shape_hash: None,
             parent_id: None,
             pagerank: 0.0,
-        complexity: None,
+            complexity: None,
         },
     ];
 
@@ -843,7 +843,10 @@ fn qartez_find_regex_matches_multiple_symbols() {
             ..Default::default()
         }))
         .unwrap();
-    assert!(out.contains("helper"), "regex hit should surface helper: {out}");
+    assert!(
+        out.contains("helper"),
+        "regex hit should surface helper: {out}"
+    );
 }
 
 #[test]
@@ -1020,9 +1023,8 @@ fn qartez_find_accepts_symbol_alias() {
         .expect("`symbol` alias should deserialize");
     assert_eq!(p.name, "helper");
 
-    let p: SoulFindParams =
-        serde_json::from_value(serde_json::json!({"symbol_name": "helper"}))
-            .expect("`symbol_name` alias should deserialize");
+    let p: SoulFindParams = serde_json::from_value(serde_json::json!({"symbol_name": "helper"}))
+        .expect("`symbol_name` alias should deserialize");
     assert_eq!(p.name, "helper");
 
     let p: SoulFindParams = serde_json::from_value(serde_json::json!({"query": "helper"}))
@@ -1202,9 +1204,10 @@ fn qartez_read_accepts_offset_alias() {
     // `offset` is the built-in Read tool's name for the start line; aliasing
     // it onto start_line lets callers paste the same params shape into
     // qartez_read without translating.
-    let p: SoulReadParams =
-        serde_json::from_value(serde_json::json!({"file": "src/utils.rs", "offset": 5, "limit": 3}))
-            .expect("`offset` alias should deserialize into start_line");
+    let p: SoulReadParams = serde_json::from_value(
+        serde_json::json!({"file": "src/utils.rs", "offset": 5, "limit": 3}),
+    )
+    .expect("`offset` alias should deserialize into start_line");
     assert_eq!(p.start_line, Some(5));
     assert_eq!(p.limit, Some(3));
 }
@@ -1239,7 +1242,7 @@ fn qartez_grep_search_bodies_hits_identifier_inside_body() {
             shape_hash: None,
             parent_idx: None,
             unused_excluded: false,
-                complexity: None,
+            complexity: None,
         }],
     )
     .unwrap();
@@ -1469,7 +1472,10 @@ fn qartez_outline_budget_respected() {
         .unwrap();
     let tokens = estimate_tokens(&result);
     let max = (50.0 * BUDGET_TOLERANCE) as usize;
-    assert!(tokens <= max, "qartez_outline at budget=50: {tokens} tokens");
+    assert!(
+        tokens <= max,
+        "qartez_outline at budget=50: {tokens} tokens"
+    );
 }
 
 #[test]
@@ -1521,7 +1527,10 @@ fn qartez_outline_shows_struct_fields_nested_under_parent() {
         }))
         .unwrap();
 
-    assert!(out.contains("Point"), "parent struct should be listed: {out}");
+    assert!(
+        out.contains("Point"),
+        "parent struct should be listed: {out}"
+    );
     assert!(out.contains("x"), "field x should appear: {out}");
     assert!(out.contains("y"), "field y should appear: {out}");
     // Fields are indented further than the parent struct row — verify the
@@ -1565,7 +1574,10 @@ fn qartez_outline_shows_tuple_struct_fields() {
         }))
         .unwrap();
 
-    assert!(out.contains("Color"), "parent struct should be listed: {out}");
+    assert!(
+        out.contains("Color"),
+        "parent struct should be listed: {out}"
+    );
     assert!(
         out.contains("0") && out.contains("u8"),
         "tuple field 0 with type u8 should appear: {out}"
@@ -1847,7 +1859,9 @@ fn qartez_impact_writes_guard_ack() {
 #[test]
 fn qartez_unused_finds_dead_code() {
     let (server, _dir) = setup();
-    let result = server.qartez_unused(Parameters(SoulUnusedParams::default())).unwrap();
+    let result = server
+        .qartez_unused(Parameters(SoulUnusedParams::default()))
+        .unwrap();
     // compute is exported but not imported by anyone
     assert!(
         result.contains("compute") || result.contains("unused"),
@@ -1858,7 +1872,9 @@ fn qartez_unused_finds_dead_code() {
 #[test]
 fn qartez_unused_scale_bounded() {
     let (server, _dir) = setup_scale(100);
-    let result = server.qartez_unused(Parameters(SoulUnusedParams::default())).unwrap();
+    let result = server
+        .qartez_unused(Parameters(SoulUnusedParams::default()))
+        .unwrap();
     assert!(
         output_within_bounds(&result),
         "qartez_unused with many symbols: {} tokens",
@@ -2042,7 +2058,10 @@ fn qartez_calls_finds_hierarchy() {
         .unwrap();
     // Post-compaction header is `helper (function) @ path:Lx-y` plus
     // `callers:` / `callees:` sections.
-    assert!(result.contains("helper"), "output should mention target: {result}");
+    assert!(
+        result.contains("helper"),
+        "output should mention target: {result}"
+    );
     assert!(
         result.contains("callers:") || result.contains("callees:"),
         "output should contain at least one hierarchy section: {result}"
@@ -2117,7 +2136,10 @@ fn budget_sweep_qartez_map() {
         let output = server.build_overview(20, budget, None, None, false, false);
         let tokens = estimate_tokens(&output);
         let max = (budget as f64 * BUDGET_TOLERANCE) as usize;
-        assert!(tokens <= max, "qartez_map budget={budget}: {tokens} > {max}");
+        assert!(
+            tokens <= max,
+            "qartez_map budget={budget}: {tokens} > {max}"
+        );
         // Output should generally grow with budget (monotonicity)
         assert!(
             output.len() >= prev_len,
@@ -2144,7 +2166,10 @@ fn budget_sweep_qartez_grep() {
             .unwrap();
         let tokens = estimate_tokens(&result);
         let max = (budget as f64 * BUDGET_TOLERANCE) as usize;
-        assert!(tokens <= max, "qartez_grep budget={budget}: {tokens} > {max}");
+        assert!(
+            tokens <= max,
+            "qartez_grep budget={budget}: {tokens} > {max}"
+        );
     }
 }
 
@@ -2193,7 +2218,9 @@ fn scale_qartez_impact_100_importers() {
 #[test]
 fn scale_qartez_unused_100_symbols() {
     let (server, _dir) = setup_scale(100);
-    let result = server.qartez_unused(Parameters(SoulUnusedParams::default())).unwrap();
+    let result = server
+        .qartez_unused(Parameters(SoulUnusedParams::default()))
+        .unwrap();
     let tokens = estimate_tokens(&result);
     assert!(
         tokens < MAX_REASONABLE_OUTPUT_TOKENS,
@@ -2282,7 +2309,9 @@ fn edge_empty_db_qartez_unused() {
     let dir = TempDir::new().unwrap();
     let conn = setup_db();
     let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
-    let result = server.qartez_unused(Parameters(SoulUnusedParams::default())).unwrap();
+    let result = server
+        .qartez_unused(Parameters(SoulUnusedParams::default()))
+        .unwrap();
     assert!(result.contains("No unused"));
 }
 
@@ -2302,9 +2331,10 @@ fn flexible_deserializer_accepts_stringified_numbers_and_bools() {
     assert_eq!(stringified.limit, Some(10));
     assert_eq!(stringified.regex, Some(true));
 
-    let read_stringified: SoulReadParams =
-        serde_json::from_str(r#"{"file_path":"a.rs","start_line":"1","end_line":"5","context_lines":"0"}"#)
-            .unwrap();
+    let read_stringified: SoulReadParams = serde_json::from_str(
+        r#"{"file_path":"a.rs","start_line":"1","end_line":"5","context_lines":"0"}"#,
+    )
+    .unwrap();
     assert_eq!(read_stringified.start_line, Some(1));
     assert_eq!(read_stringified.end_line, Some(5));
     assert_eq!(read_stringified.context_lines, Some(0));

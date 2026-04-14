@@ -91,7 +91,11 @@ impl Config {
         let primary_root = project_roots[0].clone();
 
         // For multi-root (meta-directory), store the database in cwd
-        let db_anchor = if project_roots.len() > 1 { &cwd } else { &primary_root };
+        let db_anchor = if project_roots.len() > 1 {
+            &cwd
+        } else {
+            &primary_root
+        };
         let db_path = match &cli.db_path {
             Some(p) => p.clone(),
             None => db_anchor.join(".qartez").join("index.db"),

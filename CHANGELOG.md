@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.1] — 2026-04-14
+
+### Added
+
+- **Zero-dependency installer** (`install.sh`) — single script that auto-installs Rust, builds, tests, and configures IDEs. Works on macOS and Linux without jq or bash
+- **Install portability test suite** — 50 checks covering POSIX compliance, error paths, download safety, and Docker integration
+
+### Changed
+
+- `make deploy` now delegates to `install.sh` instead of inline Makefile logic
+
+### Fixed
+
+- Ad-hoc codesign binaries on macOS to prevent Gatekeeper SIGKILL (exit 137)
+- 7 portability bugs in install flow (platform detection, shell compatibility)
+- All platforms handled in dependency auto-install (apt, dnf, pacman, apk)
+- Clippy warning in Kotlin complexity counter
+
 ## [0.1.0] — 2026-04-14
 
 Initial public release.

@@ -29,7 +29,7 @@ use std::path::Path;
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, QartezError};
+use crate::error::{QartezError, Result};
 use crate::graph::leiden::MISC_CLUSTER_ID;
 use crate::storage::models::FileRow;
 

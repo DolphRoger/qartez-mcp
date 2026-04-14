@@ -25,7 +25,14 @@ impl LanguageSupport for SwiftSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -153,9 +160,7 @@ fn record_reference(
             let parent_kind = node.parent().map(|p| p.kind()).unwrap_or("");
             if matches!(
                 parent_kind,
-                "class_declaration"
-                    | "protocol_declaration"
-                    | "type_alias_declaration"
+                "class_declaration" | "protocol_declaration" | "type_alias_declaration"
             ) {
                 return;
             }
@@ -350,14 +355,7 @@ fn extract_type_body(
                 });
                 if let Some(fn_body) = child.child_by_field_name("body") {
                     for grand in children(fn_body) {
-                        extract_from_node(
-                            grand,
-                            source,
-                            Some(idx),
-                            symbols,
-                            imports,
-                            references,
-                        );
+                        extract_from_node(grand, source, Some(idx), symbols, imports, references);
                     }
                 }
             }

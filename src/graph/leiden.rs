@@ -172,7 +172,8 @@ fn louvain_local_move(
     let two_m = 2.0 * total_weight;
     let gamma = config.resolution;
 
-    let mut prev_modularity = compute_modularity(adjacency, degrees, community, total_weight, gamma);
+    let mut prev_modularity =
+        compute_modularity(adjacency, degrees, community, total_weight, gamma);
     for _ in 0..config.max_iterations {
         let mut moved = false;
         for node in 0..n {

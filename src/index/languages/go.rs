@@ -25,7 +25,14 @@ impl LanguageSupport for GoSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -424,7 +431,11 @@ fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
         return None;
     }
 
-    let truncated = if sig.len() > 200 { &sig[..sig.floor_char_boundary(200)] } else { sig };
+    let truncated = if sig.len() > 200 {
+        &sig[..sig.floor_char_boundary(200)]
+    } else {
+        sig
+    };
     Some(truncated.to_string())
 }
 

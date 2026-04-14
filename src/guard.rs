@@ -132,11 +132,7 @@ pub struct FileFacts {
 ///
 /// Returns `Deny` iff the file is "hot" (PageRank or blast radius above the
 /// configured threshold) AND there is no fresh acknowledgment recorded.
-pub fn evaluate(
-    facts: &FileFacts,
-    cfg: &GuardConfig,
-    ack_fresh: bool,
-) -> GuardDecision {
+pub fn evaluate(facts: &FileFacts, cfg: &GuardConfig, ack_fresh: bool) -> GuardDecision {
     let hot_pagerank = facts.pagerank >= cfg.pagerank_min;
     let hot_blast = facts.blast_radius >= cfg.blast_min;
     if !hot_pagerank && !hot_blast {
@@ -227,7 +223,10 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 /// stores in `files.path`. Returns `None` if the path is outside the project.
 pub fn relativize_file_path(project_root: &Path, file_path: &Path) -> Option<String> {
     let canonical_root = project_root.canonicalize().ok()?;
-    let canonical_file = file_path.canonicalize().ok().unwrap_or_else(|| file_path.to_path_buf());
+    let canonical_file = file_path
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| file_path.to_path_buf());
     canonical_file
         .strip_prefix(&canonical_root)
         .ok()
@@ -421,14 +420,8 @@ mod tests {
         })
         .expect("expected some JSON for deny");
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid json");
-        assert_eq!(
-            parsed["hookSpecificOutput"]["hookEventName"],
-            "PreToolUse"
-        );
-        assert_eq!(
-            parsed["hookSpecificOutput"]["permissionDecision"],
-            "deny"
-        );
+        assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(
             parsed["hookSpecificOutput"]["permissionDecisionReason"],
             "test"
@@ -444,7 +437,10 @@ mod tests {
         }"#;
         let parsed: HookInput = serde_json::from_str(raw).expect("parse");
         assert_eq!(parsed.tool_name, "Edit");
-        assert_eq!(parsed.tool_input.file_path.as_deref(), Some("/abs/path/foo.rs"));
+        assert_eq!(
+            parsed.tool_input.file_path.as_deref(),
+            Some("/abs/path/foo.rs")
+        );
     }
 
     #[test]

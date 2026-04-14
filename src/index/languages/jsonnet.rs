@@ -28,13 +28,11 @@ static HIDDEN_METHOD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(\w+)\s*\(.*?\)\s*::").unwrap());
 
 /// Matches `fieldName:: value` hidden field declarations.
-static HIDDEN_FIELD_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*(\w+)\s*::").unwrap());
+static HIDDEN_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\w+)\s*::").unwrap());
 
 /// Matches `fieldName: value` visible object field declarations.
 /// Uses `:[^:]` instead of look-ahead (unsupported by the regex crate).
-static FIELD_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*(\w+)\s*:[^:]").unwrap());
+static FIELD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\w+)\s*:[^:]").unwrap());
 
 /// Matches `import "path"` statements.
 static IMPORT_RE: LazyLock<Regex> =
@@ -45,8 +43,7 @@ static IMPORTSTR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"importstr\s+["']([^"']+)["']"#).unwrap());
 
 /// Matches top-level `function(args) { ... }` pattern.
-static TOP_FUNC_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*function\s*\(").unwrap());
+static TOP_FUNC_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*function\s*\(").unwrap());
 
 impl LanguageSupport for JsonnetSupport {
     fn extensions(&self) -> &[&str] {
@@ -293,19 +290,35 @@ local defaultPort = 8080;
         assert!(names.contains(&"spec"));
 
         // Verify function vs variable classification
-        let replicas_sym = result.symbols.iter().find(|s| s.name == "replicas").unwrap();
+        let replicas_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "replicas")
+            .unwrap();
         assert!(matches!(replicas_sym.kind, SymbolKind::Function));
         assert!(!replicas_sym.is_exported);
 
-        let default_port = result.symbols.iter().find(|s| s.name == "defaultPort").unwrap();
+        let default_port = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "defaultPort")
+            .unwrap();
         assert!(matches!(default_port.kind, SymbolKind::Variable));
         assert!(!default_port.is_exported);
 
-        let api_version = result.symbols.iter().find(|s| s.name == "apiVersion").unwrap();
+        let api_version = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "apiVersion")
+            .unwrap();
         assert!(matches!(api_version.kind, SymbolKind::Variable));
         assert!(api_version.is_exported);
 
-        let metadata = result.symbols.iter().find(|s| s.name == "metadata").unwrap();
+        let metadata = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "metadata")
+            .unwrap();
         assert!(!metadata.is_exported);
 
         let deploy = result.symbols.iter().find(|s| s.name == "deploy").unwrap();

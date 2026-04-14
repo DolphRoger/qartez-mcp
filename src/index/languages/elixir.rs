@@ -351,9 +351,7 @@ mod tests {
 
     #[test]
     fn test_public_function() {
-        let result = parse_elixir(
-            "defmodule M do\n  def greet(name) do\n    name\n  end\nend\n",
-        );
+        let result = parse_elixir("defmodule M do\n  def greet(name) do\n    name\n  end\nend\n");
         let fns: Vec<_> = result
             .symbols
             .iter()
@@ -366,9 +364,7 @@ mod tests {
 
     #[test]
     fn test_private_function() {
-        let result = parse_elixir(
-            "defmodule M do\n  defp internal do\n    :ok\n  end\nend\n",
-        );
+        let result = parse_elixir("defmodule M do\n  defp internal do\n    :ok\n  end\nend\n");
         let fns: Vec<_> = result
             .symbols
             .iter()
@@ -381,9 +377,7 @@ mod tests {
 
     #[test]
     fn test_defstruct() {
-        let result = parse_elixir(
-            "defmodule User do\n  defstruct [:name, :age]\nend\n",
-        );
+        let result = parse_elixir("defmodule User do\n  defstruct [:name, :age]\nend\n");
         let structs: Vec<_> = result
             .symbols
             .iter()
@@ -411,9 +405,7 @@ mod tests {
 
     #[test]
     fn test_alias_import() {
-        let result = parse_elixir(
-            "defmodule M do\n  alias MyApp.Utils\n  import Enum\nend\n",
-        );
+        let result = parse_elixir("defmodule M do\n  alias MyApp.Utils\n  import Enum\nend\n");
         assert_eq!(result.imports.len(), 2);
         assert_eq!(result.imports[0].source, "MyApp.Utils");
         assert_eq!(result.imports[1].source, "Enum");
@@ -421,18 +413,14 @@ mod tests {
 
     #[test]
     fn test_use_import() {
-        let result = parse_elixir(
-            "defmodule M do\n  use GenServer\nend\n",
-        );
+        let result = parse_elixir("defmodule M do\n  use GenServer\nend\n");
         assert_eq!(result.imports.len(), 1);
         assert_eq!(result.imports[0].source, "GenServer");
     }
 
     #[test]
     fn test_module_attribute() {
-        let result = parse_elixir(
-            "defmodule M do\n  @version \"1.0\"\nend\n",
-        );
+        let result = parse_elixir("defmodule M do\n  @version \"1.0\"\nend\n");
         let attrs: Vec<_> = result
             .symbols
             .iter()
@@ -494,13 +482,25 @@ end
         // @moduledoc must be skipped
         assert!(!names.contains(&"moduledoc"));
 
-        let start_link = result.symbols.iter().find(|s| s.name == "start_link").unwrap();
+        let start_link = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "start_link")
+            .unwrap();
         assert!(start_link.is_exported);
 
-        let validate = result.symbols.iter().find(|s| s.name == "validate").unwrap();
+        let validate = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "validate")
+            .unwrap();
         assert!(!validate.is_exported);
 
-        let internal_log = result.symbols.iter().find(|s| s.name == "internal_log").unwrap();
+        let internal_log = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "internal_log")
+            .unwrap();
         assert!(!internal_log.is_exported);
 
         assert_eq!(result.imports.len(), 3);

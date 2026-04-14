@@ -116,10 +116,7 @@ impl Ide {
                 .join("mcp_config.json"),
             Self::Zed => home.join(".config").join("zed").join("settings.json"),
             Self::Continue => home.join(".continue").join("config.yaml"),
-            Self::OpenCode => home
-                .join(".config")
-                .join("opencode")
-                .join("opencode.json"),
+            Self::OpenCode => home.join(".config").join("opencode").join("opencode.json"),
             Self::Codex => home.join(".codex").join("config.toml"),
         }
     }
@@ -387,11 +384,7 @@ fn install_claude(bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_claude_one(
-    claude_dir: &Path,
-    bin: &str,
-    guard_bin: Option<&str>,
-) -> anyhow::Result<()> {
+fn install_claude_one(claude_dir: &Path, bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
     let hooks_dir = claude_dir.join("hooks");
     let settings_path = claude_dir.join("settings.json");
 
@@ -659,10 +652,7 @@ fn remove_claude_md_snippet(target: &Path) -> anyhow::Result<()> {
         }
     }
     fs::write(target, result)?;
-    info(&format!(
-        "Qartez snippet removed from {}",
-        target.display()
-    ));
+    info(&format!("Qartez snippet removed from {}", target.display()));
     Ok(())
 }
 
@@ -846,9 +836,15 @@ fn install_json_mcp_servers(ide: Ide, bin: &str) -> anyhow::Result<()> {
     write_json(&config_path, &data)?;
 
     if current.is_none() {
-        info(&format!("Added qartez to {ide} config: {}", config_path.display()));
+        info(&format!(
+            "Added qartez to {ide} config: {}",
+            config_path.display()
+        ));
     } else {
-        info(&format!("Updated qartez in {ide} config: {} -> {bin}", current.unwrap_or_default()));
+        info(&format!(
+            "Updated qartez in {ide} config: {} -> {bin}",
+            current.unwrap_or_default()
+        ));
     }
     Ok(())
 }
@@ -899,7 +895,11 @@ fn install_zed(bin: &str) -> anyhow::Result<()> {
     };
 
     let cleaned = strip_jsonc(&raw);
-    let json_str = if cleaned.trim().is_empty() { "{}" } else { &cleaned };
+    let json_str = if cleaned.trim().is_empty() {
+        "{}"
+    } else {
+        &cleaned
+    };
     let mut data: serde_json::Value = serde_json::from_str(json_str)?;
 
     if data.get("context_servers").is_none() {
@@ -920,17 +920,21 @@ fn install_zed(bin: &str) -> anyhow::Result<()> {
     }
 
     backup_file(&config_path)?;
-    let existed = data["context_servers"]
-        .get("qartez")
-        .is_some();
+    let existed = data["context_servers"].get("qartez").is_some();
     data["context_servers"]["qartez"] = desired;
 
     // Write back as clean JSON (comments stripped, but that's acceptable)
     write_json(&config_path, &data)?;
     if existed {
-        info(&format!("Updated qartez in Zed config: {}", config_path.display()));
+        info(&format!(
+            "Updated qartez in Zed config: {}",
+            config_path.display()
+        ));
     } else {
-        info(&format!("Added qartez to Zed config: {}", config_path.display()));
+        info(&format!(
+            "Added qartez to Zed config: {}",
+            config_path.display()
+        ));
     }
     Ok(())
 }
@@ -1005,9 +1009,7 @@ fn install_continue(bin: &str) -> anyhow::Result<()> {
 
     // Ensure mcpServers is a sequence
     let servers_key = serde_yaml::Value::String("mcpServers".into());
-    if !mapping.contains_key(&servers_key)
-        || !mapping[&servers_key].is_sequence()
-    {
+    if !mapping.contains_key(&servers_key) || !mapping[&servers_key].is_sequence() {
         mapping.insert(servers_key.clone(), serde_yaml::Value::Sequence(vec![]));
     }
 
@@ -1101,10 +1103,7 @@ fn uninstall_continue() -> anyhow::Result<()> {
     servers.remove(i);
     let out = serde_yaml::to_string(&data)?;
     fs::write(&config_path, out)?;
-    info(&format!(
-        "Removed qartez from {}",
-        config_path.display()
-    ));
+    info(&format!("Removed qartez from {}", config_path.display()));
     Ok(())
 }
 
@@ -1176,10 +1175,7 @@ fn uninstall_opencode() -> anyhow::Result<()> {
         mcp.remove("qartez");
     }
     write_json(&config_path, &data)?;
-    info(&format!(
-        "Removed qartez from {}",
-        config_path.display()
-    ));
+    info(&format!("Removed qartez from {}", config_path.display()));
     Ok(())
 }
 
@@ -1269,10 +1265,7 @@ fn uninstall_codex() -> anyhow::Result<()> {
     backup_file(&config_path)?;
     let out = remove_codex_block(&content);
     fs::write(&config_path, out)?;
-    info(&format!(
-        "Removed qartez from {}",
-        config_path.display()
-    ));
+    info(&format!("Removed qartez from {}", config_path.display()));
     Ok(())
 }
 
@@ -1457,10 +1450,7 @@ fn run_uninstall(cli: &Cli) -> anyhow::Result<()> {
     }
 
     eprintln!();
-    eprintln!(
-        "  {} Uninstall complete.",
-        style("✓").green().bold()
-    );
+    eprintln!("  {} Uninstall complete.", style("✓").green().bold());
     Ok(())
 }
 
@@ -1508,11 +1498,7 @@ fn select_ides(cli: &Cli) -> anyhow::Result<Vec<Ide>> {
                 };
                 format!("{:<16} ({})", ide.to_string(), style(detail).dim())
             } else {
-                format!(
-                    "{:<16} ({})",
-                    ide.to_string(),
-                    style("not installed").dim()
-                )
+                format!("{:<16} ({})", ide.to_string(), style("not installed").dim())
             }
         })
         .collect();
@@ -1525,10 +1511,7 @@ fn select_ides(cli: &Cli) -> anyhow::Result<Vec<Ide>> {
         .defaults(&defaults)
         .interact()?;
 
-    Ok(selections
-        .into_iter()
-        .map(|i| detected[i].0)
-        .collect())
+    Ok(selections.into_iter().map(|i| detected[i].0).collect())
 }
 
 fn parse_ide_list(names: &[String]) -> anyhow::Result<Vec<Ide>> {
@@ -1542,10 +1525,7 @@ fn parse_ide_list(names: &[String]) -> anyhow::Result<Vec<Ide>> {
             }
         } else {
             let known: Vec<&str> = Ide::ALL.iter().map(|i| i.slug()).collect();
-            anyhow::bail!(
-                "Unknown IDE '{name}'. Known: {}",
-                known.join(", ")
-            );
+            anyhow::bail!("Unknown IDE '{name}'. Known: {}", known.join(", "));
         }
     }
     Ok(result)

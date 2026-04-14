@@ -25,7 +25,15 @@ impl LanguageSupport for RubySupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, 0, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            0,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -134,7 +142,9 @@ fn extract_from_node(
     record_reference(node, source, enclosing, references);
 
     for child in children(node) {
-        extract_from_node(child, source, depth, enclosing, symbols, imports, references);
+        extract_from_node(
+            child, source, depth, enclosing, symbols, imports, references,
+        );
     }
 }
 

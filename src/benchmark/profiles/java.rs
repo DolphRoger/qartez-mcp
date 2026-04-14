@@ -64,4 +64,3 @@ pub fn profile() -> &'static LanguageProfile {
     };
     &P
 }
-

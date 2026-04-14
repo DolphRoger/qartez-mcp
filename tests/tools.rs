@@ -1239,8 +1239,8 @@ fn test_end_to_end_index_pagerank_blast() {
 #[cfg(feature = "benchmark")]
 #[test]
 fn test_call_tool_by_name_dispatches_to_qartez_stats() {
-    use serde_json::json;
     use qartez_mcp::server::QartezServer;
+    use serde_json::json;
 
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
@@ -1276,8 +1276,8 @@ fn test_call_tool_by_name_dispatches_to_qartez_stats() {
 #[cfg(feature = "benchmark")]
 #[test]
 fn test_qartez_read_file_path_alone_reads_whole_file() {
-    use serde_json::json;
     use qartez_mcp::server::QartezServer;
+    use serde_json::json;
 
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
@@ -1360,11 +1360,11 @@ mod guard_binary {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    use rusqlite::Connection;
     use qartez_mcp::graph::pagerank;
     use qartez_mcp::guard;
     use qartez_mcp::index;
     use qartez_mcp::storage;
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
     /// Build a tiny indexed project: `hub.rs` imported twice so it has a
@@ -1373,11 +1373,7 @@ mod guard_binary {
         let dir = TempDir::new().expect("tempdir");
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).expect("mkdir src");
-        std::fs::write(
-            src.join("hub.rs"),
-            "pub fn shared() -> u32 { 42 }\n",
-        )
-        .expect("write hub");
+        std::fs::write(src.join("hub.rs"), "pub fn shared() -> u32 { 42 }\n").expect("write hub");
         std::fs::write(
             src.join("a.rs"),
             "use crate::hub::shared;\npub fn a() -> u32 { shared() }\n",
@@ -1388,11 +1384,8 @@ mod guard_binary {
             "use crate::hub::shared;\npub fn b() -> u32 { shared() + 1 }\n",
         )
         .expect("write b");
-        std::fs::write(
-            src.join("lib.rs"),
-            "pub mod a;\npub mod b;\npub mod hub;\n",
-        )
-        .expect("write lib");
+        std::fs::write(src.join("lib.rs"), "pub mod a;\npub mod b;\npub mod hub;\n")
+            .expect("write lib");
         // Cargo.toml so detect_project_root can find it if the guard walks
         // upward from the file_path.
         std::fs::write(

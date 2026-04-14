@@ -31,8 +31,7 @@ static CREATE_INDEX_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // ALTER TABLE [schema.]name
 static ALTER_TABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_.]*)")
-        .unwrap()
+    Regex::new(r"(?i)^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_.]*)").unwrap()
 });
 
 // CREATE [OR REPLACE] VIEW [IF NOT EXISTS] [schema.]name
@@ -42,18 +41,14 @@ static CREATE_VIEW_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // CREATE [OR REPLACE] FUNCTION [schema.]name
 static CREATE_FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([A-Za-z_][A-Za-z0-9_.]*)",
-    )
-    .unwrap()
+    Regex::new(r"(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([A-Za-z_][A-Za-z0-9_.]*)")
+        .unwrap()
 });
 
 // CREATE [OR REPLACE] PROCEDURE [schema.]name
 static CREATE_PROCEDURE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)",
-    )
-    .unwrap()
+    Regex::new(r"(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)")
+        .unwrap()
 });
 
 // CREATE TRIGGER [IF NOT EXISTS] name
@@ -78,16 +73,12 @@ static CREATE_SCHEMA_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // CREATE SEQUENCE [IF NOT EXISTS] [schema.]name
 static CREATE_SEQUENCE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)^\s*CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_.]*)",
-    )
-    .unwrap()
+    Regex::new(r"(?i)^\s*CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_.]*)")
+        .unwrap()
 });
 
 // END; or END $$ — terminates BEGIN...END blocks
-static END_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*END\s*[;$]").unwrap()
-});
+static END_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*END\s*[;$]").unwrap());
 
 /// Truncates a string to at most `max_len` characters.
 fn truncate_signature(line: &str, max_len: usize) -> String {
@@ -396,7 +387,8 @@ mod tests {
 
     #[test]
     fn test_if_not_exists() {
-        let result = parse_sql("CREATE TABLE IF NOT EXISTS sessions (\n  id UUID PRIMARY KEY\n);\n");
+        let result =
+            parse_sql("CREATE TABLE IF NOT EXISTS sessions (\n  id UUID PRIMARY KEY\n);\n");
         assert_eq!(result.symbols.len(), 1);
         assert_eq!(result.symbols[0].name, "sessions");
         assert!(matches!(result.symbols[0].kind, SymbolKind::Class));

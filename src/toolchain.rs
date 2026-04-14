@@ -296,11 +296,7 @@ pub fn run_command(
         }
     }
 
-    let exit_code = child
-        .wait()
-        .ok()
-        .and_then(|s| s.code())
-        .unwrap_or(-1);
+    let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
     let stdout = String::from_utf8_lossy(&stdout_bytes);
@@ -394,11 +390,7 @@ mod tests {
     #[test]
     fn test_detect_maven_toolchain() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("pom.xml"),
-            "<project></project>",
-        )
-        .unwrap();
+        fs::write(dir.path().join("pom.xml"), "<project></project>").unwrap();
 
         let tc = detect_toolchain(dir.path()).unwrap();
         assert_eq!(tc.name, "java");

@@ -104,9 +104,10 @@ fn extract_table_array(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSym
 fn extract_top_level_pair(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbol>) {
     // Only extract pairs whose parent is the document root
     if let Some(parent) = node.parent()
-        && parent.kind() != "document" {
-            return;
-        }
+        && parent.kind() != "document"
+    {
+        return;
+    }
     for child in children(node) {
         if child.kind().contains("key") || child.kind() == "dotted_key" {
             let name = node_text(child, source).trim().to_string();

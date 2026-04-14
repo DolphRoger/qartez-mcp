@@ -25,7 +25,14 @@ impl LanguageSupport for JavaSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -290,14 +297,7 @@ fn extract_class_body(
                     let idx = symbols.len();
                     symbols.push(sym);
                     for grand in children(child) {
-                        extract_from_node(
-                            grand,
-                            source,
-                            Some(idx),
-                            symbols,
-                            imports,
-                            references,
-                        );
+                        extract_from_node(grand, source, Some(idx), symbols, imports, references);
                     }
                 }
             }
@@ -306,14 +306,7 @@ fn extract_class_body(
                     let idx = symbols.len();
                     symbols.push(sym);
                     for grand in children(child) {
-                        extract_from_node(
-                            grand,
-                            source,
-                            Some(idx),
-                            symbols,
-                            imports,
-                            references,
-                        );
+                        extract_from_node(grand, source, Some(idx), symbols, imports, references);
                     }
                 }
             }
@@ -321,14 +314,13 @@ fn extract_class_body(
                 extract_field(child, source, symbols);
             }
             "class_declaration" => {
-                let idx =
-                    if let Some(sym) = extract_named_decl(child, source, SymbolKind::Class) {
-                        let i = symbols.len();
-                        symbols.push(sym);
-                        Some(i)
-                    } else {
-                        class_enclosing
-                    };
+                let idx = if let Some(sym) = extract_named_decl(child, source, SymbolKind::Class) {
+                    let i = symbols.len();
+                    symbols.push(sym);
+                    Some(i)
+                } else {
+                    class_enclosing
+                };
                 extract_class_body(child, source, idx, symbols, imports, references);
             }
             "interface_declaration" => {
@@ -343,14 +335,13 @@ fn extract_class_body(
                 extract_class_body(child, source, idx, symbols, imports, references);
             }
             "enum_declaration" => {
-                let idx =
-                    if let Some(sym) = extract_named_decl(child, source, SymbolKind::Enum) {
-                        let i = symbols.len();
-                        symbols.push(sym);
-                        Some(i)
-                    } else {
-                        class_enclosing
-                    };
+                let idx = if let Some(sym) = extract_named_decl(child, source, SymbolKind::Enum) {
+                    let i = symbols.len();
+                    symbols.push(sym);
+                    Some(i)
+                } else {
+                    class_enclosing
+                };
                 extract_class_body(child, source, idx, symbols, imports, references);
             }
             _ => {}
@@ -480,7 +471,11 @@ fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
         return None;
     }
 
-    let truncated = if sig.len() > 200 { &sig[..sig.floor_char_boundary(200)] } else { sig };
+    let truncated = if sig.len() > 200 {
+        &sig[..sig.floor_char_boundary(200)]
+    } else {
+        sig
+    };
     Some(truncated.to_string())
 }
 

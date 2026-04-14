@@ -25,7 +25,14 @@ impl LanguageSupport for RustSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -513,14 +520,7 @@ fn extract_impl_methods(
                 // call/type reference inside is attributed to it.
                 if let Some(method_body) = child.child_by_field_name("body") {
                     for grand in children(method_body) {
-                        extract_from_node(
-                            grand,
-                            source,
-                            Some(idx),
-                            symbols,
-                            imports,
-                            references,
-                        );
+                        extract_from_node(grand, source, Some(idx), symbols, imports, references);
                     }
                 }
             }
@@ -706,9 +706,10 @@ fn collect_path_segments(node: Node, source: &[u8], parts: &mut Vec<String>) {
 fn is_internal_path(path: &str) -> bool {
     for prefix in &["crate", "super", "self"] {
         if let Some(rest) = path.strip_prefix(prefix)
-            && (rest.is_empty() || rest.starts_with("::")) {
-                return true;
-            }
+            && (rest.is_empty() || rest.starts_with("::"))
+        {
+            return true;
+        }
     }
     false
 }
@@ -728,7 +729,11 @@ fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
         return None;
     }
 
-    let truncated = if sig.len() > 200 { &sig[..sig.floor_char_boundary(200)] } else { sig };
+    let truncated = if sig.len() > 200 {
+        &sig[..sig.floor_char_boundary(200)]
+    } else {
+        sig
+    };
     Some(truncated.to_string())
 }
 
@@ -1010,8 +1015,9 @@ fn caller() -> i32 { helper() + 1 }
             .filter(|r| matches!(r.kind, ReferenceKind::Call))
             .collect();
         assert!(
-            call_refs.iter().any(|r| r.name == "helper"
-                && r.from_symbol_idx == Some(caller_idx)),
+            call_refs
+                .iter()
+                .any(|r| r.name == "helper" && r.from_symbol_idx == Some(caller_idx)),
             "helper() call inside caller should be attributed to caller, got {:?}",
             result.references
         );
@@ -1128,8 +1134,10 @@ impl Foo {
             .position(|s| s.name == "run" && matches!(s.kind, SymbolKind::Method))
             .expect("run method");
         assert!(
-            result.references.iter().any(|r| r.name == "helper"
-                && r.from_symbol_idx == Some(method_idx)),
+            result
+                .references
+                .iter()
+                .any(|r| r.name == "helper" && r.from_symbol_idx == Some(method_idx)),
             "helper() inside run should be attributed to run method"
         );
     }

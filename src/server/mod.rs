@@ -135,12 +135,15 @@ impl QartezServer {
         // reads each indexed file once and inserts a row per symbol body
         // — and subsequent opens short-circuit via the count check.
         let body_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM symbols_body_fts", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM symbols_body_fts", [], |row| {
+                row.get(0)
+            })
             .unwrap_or(0);
         let symbol_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
             .unwrap_or(0);
-        if body_count == 0 && symbol_count > 0
+        if body_count == 0
+            && symbol_count > 0
             && let Err(e) = crate::storage::write::rebuild_symbol_bodies(&conn, &project_root)
         {
             tracing::warn!("failed to rebuild symbols_body_fts on server start: {e}");
@@ -437,7 +440,11 @@ impl QartezServer {
         let symbol_count = read::get_symbol_count(&conn).unwrap_or(0);
 
         let has_boosts = boost_files.is_some() || boost_terms.is_some();
-        let fetch_limit = if has_boosts { top_n.saturating_mul(3) } else { top_n };
+        let fetch_limit = if has_boosts {
+            top_n.saturating_mul(3)
+        } else {
+            top_n
+        };
 
         let mut files = if all_files {
             match read::get_all_files_ranked(&conn) {
@@ -991,9 +998,7 @@ fn is_test_path(path: &str) -> bool {
             return true;
         }
         // Python: test_*.py, *_test.py
-        if (name.starts_with("test_") && name.ends_with(".py"))
-            || name.ends_with("_test.py")
-        {
+        if (name.starts_with("test_") && name.ends_with(".py")) || name.ends_with("_test.py") {
             return true;
         }
         // Java/Kotlin: *Test.java, *Tests.java, *Test.kt, *Tests.kt
@@ -1499,7 +1504,10 @@ impl QartezServer {
             open_world_hint = false
         )
     )]
-    fn qartez_find(&self, Parameters(params): Parameters<SoulFindParams>) -> Result<String, String> {
+    fn qartez_find(
+        &self,
+        Parameters(params): Parameters<SoulFindParams>,
+    ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
         let use_regex = params.regex.unwrap_or(false);
         let results: Vec<(
@@ -1517,8 +1525,8 @@ impl QartezServer {
                     .into_iter()
                     .map(|f| (f.path.clone(), f))
                     .collect();
-            let all = read::get_all_symbols_with_path(&conn)
-                .map_err(|e| format!("DB error: {e}"))?;
+            let all =
+                read::get_all_symbols_with_path(&conn).map_err(|e| format!("DB error: {e}"))?;
             all.into_iter()
                 .filter(|(s, _)| re.is_match(&s.name))
                 .filter_map(|(s, p)| all_paths.get(&p).cloned().map(|f| (s, f)))
@@ -1602,7 +1610,10 @@ impl QartezServer {
             open_world_hint = false
         )
     )]
-    fn qartez_read(&self, Parameters(params): Parameters<SoulReadParams>) -> Result<String, String> {
+    fn qartez_read(
+        &self,
+        Parameters(params): Parameters<SoulReadParams>,
+    ) -> Result<String, String> {
         // 25_000 bytes ≈ 6 KiB of tokens — a comfortable ceiling for two
         // or three mid-sized functions while still leaving headroom in a
         // 200k context window. Callers can raise it if they know they
@@ -1614,9 +1625,8 @@ impl QartezServer {
         // whole file by default, or a specific slice when start_line/end_line/
         // limit are set. Saves callers from falling back to the built-in Read
         // tool for imports, module headers, small files, or whole-file scans.
-        let no_symbols_requested =
-            params.symbol_name.as_deref().is_none_or(|s| s.is_empty())
-                && params.symbols.as_ref().is_none_or(|v| v.is_empty());
+        let no_symbols_requested = params.symbol_name.as_deref().is_none_or(|s| s.is_empty())
+            && params.symbols.as_ref().is_none_or(|v| v.is_empty());
         if no_symbols_requested && let Some(ref fp) = params.file_path {
             let abs_path = self.project_root.join(fp);
             let source = std::fs::read_to_string(&abs_path)
@@ -1775,12 +1785,7 @@ impl QartezServer {
                 // field a caller needs.
                 let mut section = format!(
                     "// {visibility} {} {} @ {}:L{}-{} →{}\n",
-                    sym.name,
-                    sym.kind,
-                    file.path,
-                    sym.line_start,
-                    sym.line_end,
-                    blast_r,
+                    sym.name, sym.kind, file.path, sym.line_start, sym.line_end, blast_r,
                 );
                 for (i, line) in lines[start..end].iter().enumerate() {
                     section.push_str(&format!("{:>4} | {}\n", start + i + 1, line));
@@ -2057,7 +2062,10 @@ impl QartezServer {
             open_world_hint = false
         )
     )]
-    fn qartez_grep(&self, Parameters(params): Parameters<SoulGrepParams>) -> Result<String, String> {
+    fn qartez_grep(
+        &self,
+        Parameters(params): Parameters<SoulGrepParams>,
+    ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
         let limit = params.limit.unwrap_or(20) as i64;
         let budget = params.token_budget.unwrap_or(4000) as usize;
@@ -2195,7 +2203,10 @@ impl QartezServer {
             open_world_hint = false
         )
     )]
-    fn qartez_refs(&self, Parameters(params): Parameters<SoulRefsParams>) -> Result<String, String> {
+    fn qartez_refs(
+        &self,
+        Parameters(params): Parameters<SoulRefsParams>,
+    ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
         let budget = params.token_budget.unwrap_or(4000) as usize;
         let concise = is_concise(&params.format);
@@ -2222,8 +2233,7 @@ impl QartezServer {
 
         for (sym, file, importers) in &refs {
             if concise {
-                let paths: Vec<&str> =
-                    importers.iter().map(|(_, f)| f.path.as_str()).collect();
+                let paths: Vec<&str> = importers.iter().map(|(_, f)| f.path.as_str()).collect();
                 out.push_str(&format!(
                     "{} ({}) in {} — {} ref(s): {}\n",
                     sym.name,
@@ -2639,11 +2649,12 @@ impl QartezServer {
                     out.push('\n');
                 }
                 let available = toolchain::binary_available(&tc.build_tool);
-                let marker = if available { "" } else { " (not found on PATH)" };
-                out.push_str(&format!(
-                    "# Project toolchain: {}{}\n\n",
-                    tc.name, marker,
-                ));
+                let marker = if available {
+                    ""
+                } else {
+                    " (not found on PATH)"
+                };
+                out.push_str(&format!("# Project toolchain: {}{}\n\n", tc.name, marker,));
                 out.push_str(&format!("Build tool: {}\n", tc.build_tool));
                 out.push_str(&format!("Test:       {}\n", tc.test_cmd.join(" ")));
                 out.push_str(&format!("Build:      {}\n", tc.build_cmd.join(" ")));
@@ -2711,9 +2722,10 @@ impl QartezServer {
         let timeout = params.timeout.unwrap_or(60).min(600);
         let filter = params.filter.as_deref();
         if let Some(f) = filter
-            && f.starts_with('-') {
-                return Err(format!("Filter must not start with '-': {f}"));
-            }
+            && f.starts_with('-')
+        {
+            return Err(format!("Filter must not start with '-': {f}"));
+        }
 
         let (exit_code, output) = toolchain::run_command(&self.project_root, cmd, filter, timeout)?;
 
@@ -2741,7 +2753,10 @@ impl QartezServer {
             open_world_hint = false
         )
     )]
-    fn qartez_move(&self, Parameters(params): Parameters<SoulMoveParams>) -> Result<String, String> {
+    fn qartez_move(
+        &self,
+        Parameters(params): Parameters<SoulMoveParams>,
+    ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
         let mut results = read::find_symbol_by_name(&conn, &params.symbol)
             .map_err(|e| format!("DB error: {e}"))?;
@@ -3032,10 +3047,7 @@ impl QartezServer {
 
         if !apply {
             if importer_paths.is_empty() {
-                return Ok(format!(
-                    "{} → {}: 0 importers\n",
-                    params.from, params.to,
-                ));
+                return Ok(format!("{} → {}: 0 importers\n", params.from, params.to,));
             }
             // Single line: summary + comma-separated importer list. For a
             // typical refactor preview (≤ a dozen importers) this stays well
@@ -3110,10 +3122,8 @@ impl QartezServer {
                     if let Err(e) = std::fs::write(&parent_abs, &rewritten) {
                         failed_writes.push(format!("{}: {e}", parent_abs.display()));
                     } else {
-                        mod_rewrite_note = format!(
-                            ", parent mod decl updated in {}",
-                            parent_rel.display(),
-                        );
+                        mod_rewrite_note =
+                            format!(", parent mod decl updated in {}", parent_rel.display(),);
                     }
                 }
             }
@@ -3204,9 +3214,7 @@ impl QartezServer {
                 emitted += 1;
             }
             if let Some(next) = next_offset {
-                out.push_str(&format!(
-                    "next_offset: {next} (of {total_non_fields})\n",
-                ));
+                out.push_str(&format!("next_offset: {next} (of {total_non_fields})\n",));
             }
             return Ok(out);
         }
@@ -3293,9 +3301,7 @@ impl QartezServer {
         }
 
         if let Some(next) = next_offset {
-            out.push_str(&format!(
-                "next_offset: {next} (of {total_non_fields})\n",
-            ));
+            out.push_str(&format!("next_offset: {next} (of {total_non_fields})\n",));
         }
 
         Ok(out)
@@ -3312,7 +3318,10 @@ impl QartezServer {
             open_world_hint = false
         )
     )]
-    fn qartez_deps(&self, Parameters(params): Parameters<SoulDepsParams>) -> Result<String, String> {
+    fn qartez_deps(
+        &self,
+        Parameters(params): Parameters<SoulDepsParams>,
+    ) -> Result<String, String> {
         let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
         let budget = params.token_budget.unwrap_or(4000) as usize;
         let concise = is_concise(&params.format);
@@ -3643,9 +3652,7 @@ impl QartezServer {
                                 Some(fn_name) => {
                                     out.push_str(&format!("  {fn_name} @ {path}:L{line}\n"))
                                 }
-                                None => {
-                                    out.push_str(&format!("  (top) @ {path}:L{line}\n"))
-                                }
+                                None => out.push_str(&format!("  (top) @ {path}:L{line}\n")),
                             }
                         }
                     }
@@ -3679,19 +3686,15 @@ impl QartezServer {
                         for callee_name in &seen_order {
                             let _line = first_line[callee_name];
                             let resolved =
-                                resolve_cache
-                                    .entry(callee_name.clone())
-                                    .or_insert_with(|| {
-                                        read::find_symbol_by_name(&conn, callee_name)
-                                            .unwrap_or_default()
-                                    });
+                                resolve_cache.entry(callee_name.clone()).or_insert_with(|| {
+                                    read::find_symbol_by_name(&conn, callee_name)
+                                        .unwrap_or_default()
+                                });
                             match resolved.first() {
                                 Some((_, f)) => {
                                     out.push_str(&format!("  {callee_name} @ {}\n", f.path))
                                 }
-                                None => {
-                                    out.push_str(&format!("  {callee_name} (extern)\n"))
-                                }
+                                None => out.push_str(&format!("  {callee_name} (extern)\n")),
                             }
                         }
                     }
@@ -3759,11 +3762,7 @@ impl QartezServer {
                         if targets.len() == 1 {
                             out.push_str(&format!("  {} → {}\n", root, targets[0]));
                         } else {
-                            out.push_str(&format!(
-                                "  {} → {{{}}}\n",
-                                root,
-                                targets.join(", ")
-                            ));
+                            out.push_str(&format!("  {} → {{{}}}\n", root, targets.join(", ")));
                         }
                     }
                 }
@@ -3963,23 +3962,19 @@ impl QartezServer {
 
         match level {
             HotspotLevel::File => {
-                let all_files =
-                    read::get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
+                let all_files = read::get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
 
                 // For each file, compute avg complexity of its functions.
                 let mut scored: Vec<(String, f64, f64, f64, i64, f64)> = Vec::new();
                 for file in &all_files {
-                    let symbols = read::get_symbols_for_file(&conn, file.id)
-                        .unwrap_or_default();
-                    let complexities: Vec<u32> = symbols
-                        .iter()
-                        .filter_map(|s| s.complexity)
-                        .collect();
+                    let symbols = read::get_symbols_for_file(&conn, file.id).unwrap_or_default();
+                    let complexities: Vec<u32> =
+                        symbols.iter().filter_map(|s| s.complexity).collect();
                     if complexities.is_empty() {
                         continue;
                     }
-                    let avg_cc =
-                        complexities.iter().copied().sum::<u32>() as f64 / complexities.len() as f64;
+                    let avg_cc = complexities.iter().copied().sum::<u32>() as f64
+                        / complexities.len() as f64;
                     let max_cc = complexities.iter().copied().max().unwrap_or(1) as f64;
                     let coupling = file.pagerank;
                     let churn = file.change_count;
@@ -3988,14 +3983,7 @@ impl QartezServer {
                     // 1 to churn avoids zeroing out files with no git history.
                     let score = max_cc * coupling * (1.0 + churn as f64);
                     if score > 0.0 {
-                        scored.push((
-                            file.path.clone(),
-                            score,
-                            avg_cc,
-                            max_cc,
-                            churn,
-                            coupling,
-                        ));
+                        scored.push((file.path.clone(), score, avg_cc, max_cc, churn, coupling));
                     }
                 }
 
@@ -4012,12 +4000,20 @@ impl QartezServer {
                     for (i, (path, score, avg, max, churn, pr)) in scored.iter().enumerate() {
                         out.push_str(&format!(
                             "{} {:.2} {} {:.1} {:.0} {} {:.4}\n",
-                            i + 1, score, path, avg, max, churn, pr,
+                            i + 1,
+                            score,
+                            path,
+                            avg,
+                            max,
+                            churn,
+                            pr,
                         ));
                     }
                 } else {
                     out.push_str("# Hotspot Analysis (file level)\n\n");
-                    out.push_str("Hotspot score = max_complexity × pagerank × (1 + change_count)\n\n");
+                    out.push_str(
+                        "Hotspot score = max_complexity × pagerank × (1 + change_count)\n\n",
+                    );
                     out.push_str("  # | Score     | File                               | AvgCC | MaxCC | Churn | PageRank\n");
                     out.push_str("----+-----------+------------------------------------+-------+-------+-------+---------\n");
                     for (i, (path, score, avg, max, churn, pr)) in scored.iter().enumerate() {
@@ -4036,16 +4032,13 @@ impl QartezServer {
                 Ok(out)
             }
             HotspotLevel::Symbol => {
-                let all_symbols = read::get_all_symbols_with_path(&conn)
-                    .map_err(|e| format!("DB error: {e}"))?;
+                let all_symbols =
+                    read::get_all_symbols_with_path(&conn).map_err(|e| format!("DB error: {e}"))?;
 
                 // Pre-load file change counts.
-                let all_files =
-                    read::get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
-                let file_churn: HashMap<i64, i64> = all_files
-                    .iter()
-                    .map(|f| (f.id, f.change_count))
-                    .collect();
+                let all_files = read::get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
+                let file_churn: HashMap<i64, i64> =
+                    all_files.iter().map(|f| (f.id, f.change_count)).collect();
 
                 let mut scored: Vec<(String, String, String, f64, u32, f64, i64)> = Vec::new();
                 for (sym, file_path) in &all_symbols {
@@ -4081,7 +4074,14 @@ impl QartezServer {
                     for (i, (name, kind, path, score, cc, pr, churn)) in scored.iter().enumerate() {
                         out.push_str(&format!(
                             "{} {:.4} {} {} {} {} {:.4} {}\n",
-                            i + 1, score, name, kind, path, cc, pr, churn,
+                            i + 1,
+                            score,
+                            name,
+                            kind,
+                            path,
+                            cc,
+                            pr,
+                            churn,
                         ));
                     }
                 } else {
@@ -4235,12 +4235,9 @@ impl QartezServer {
         if boundary_config_path.exists() {
             match load_config(&boundary_config_path) {
                 Ok(cfg) => {
-                    let files =
-                        get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
-                    let edges =
-                        get_all_edges(&conn).map_err(|e| format!("DB error: {e}"))?;
-                    wiki_cfg.boundary_violations =
-                        Some(check_boundaries(&cfg, &files, &edges));
+                    let files = get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
+                    let edges = get_all_edges(&conn).map_err(|e| format!("DB error: {e}"))?;
+                    wiki_cfg.boundary_violations = Some(check_boundaries(&cfg, &files, &edges));
                 }
                 Err(e) => {
                     tracing::warn!("boundary config parse failed: {e}");
@@ -4314,8 +4311,7 @@ impl QartezServer {
         if params.suggest.unwrap_or(false) {
             let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
             let files = get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
-            let clusters =
-                get_all_file_clusters(&conn).map_err(|e| format!("DB error: {e}"))?;
+            let clusters = get_all_file_clusters(&conn).map_err(|e| format!("DB error: {e}"))?;
             let edges = get_all_edges(&conn).map_err(|e| format!("DB error: {e}"))?;
             drop(conn);
 
@@ -4544,7 +4540,10 @@ fn relative_import_stem(file_path: &str) -> String {
 /// Returns `None` when the file is not a Rust source file or no parent
 /// declaration file can be located — callers should skip the mod-decl
 /// rewrite in that case rather than erroring out.
-fn find_parent_mod_file(project_root: &std::path::Path, rel_path: &str) -> Option<std::path::PathBuf> {
+fn find_parent_mod_file(
+    project_root: &std::path::Path,
+    rel_path: &str,
+) -> Option<std::path::PathBuf> {
     if !rel_path.ends_with(".rs") {
         return None;
     }
@@ -4718,8 +4717,7 @@ impl QartezServer {
                 self.qartez_context(Parameters(p))
             }
             "qartez_wiki" => {
-                let p: SoulWikiParams =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let p: SoulWikiParams = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 self.qartez_wiki(Parameters(p))
             }
             "qartez_hotspots" => {
@@ -4753,10 +4751,7 @@ impl ServerHandler for QartezServer {
                 .enable_resources()
                 .build(),
         )
-        .with_server_info(Implementation::new(
-            "qartez-mcp",
-            env!("CARGO_PKG_VERSION"),
-        ))
+        .with_server_info(Implementation::new("qartez-mcp", env!("CARGO_PKG_VERSION")))
     }
 
     fn list_resources(

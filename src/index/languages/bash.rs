@@ -88,9 +88,7 @@ fn count_complexity(node: Node, source: &[u8]) -> u32 {
         }
         "pipeline" => {
             // +1 per pipe segment beyond the first
-            children(node)
-                .filter(|c| c.kind() == "|")
-                .count() as u32
+            children(node).filter(|c| c.kind() == "|").count() as u32
         }
         _ => 0,
     };

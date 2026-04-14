@@ -210,7 +210,8 @@ mod tests {
 
     #[test]
     fn test_phony() {
-        let result = parse_makefile(".PHONY: build test\n\nbuild:\n\tcargo build\n\ntest:\n\tcargo test\n");
+        let result =
+            parse_makefile(".PHONY: build test\n\nbuild:\n\tcargo build\n\ntest:\n\tcargo test\n");
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"build"));
         assert!(names.contains(&"test"));

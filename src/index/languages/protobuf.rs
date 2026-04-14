@@ -108,7 +108,10 @@ fn extract_import(node: Node, source: &[u8]) -> Option<ExtractedImport> {
     })
 }
 
-#[expect(clippy::only_used_in_recursion, reason = "imports collected in nested messages")]
+#[expect(
+    clippy::only_used_in_recursion,
+    reason = "imports collected in nested messages"
+)]
 fn extract_message(
     node: Node,
     source: &[u8],
@@ -214,9 +217,10 @@ fn extract_enum(
 
     for child in children(body) {
         if child.kind() == "enum_field"
-            && let Some(sym) = extract_enum_variant(child, source, enum_idx) {
-                symbols.push(sym);
-            }
+            && let Some(sym) = extract_enum_variant(child, source, enum_idx)
+        {
+            symbols.push(sym);
+        }
     }
 }
 
@@ -240,11 +244,7 @@ fn extract_enum_variant(node: Node, source: &[u8], parent_idx: usize) -> Option<
     })
 }
 
-fn extract_service(
-    node: Node,
-    source: &[u8],
-    symbols: &mut Vec<ExtractedSymbol>,
-) {
+fn extract_service(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbol>) {
     let name = match children(node).find(|c| c.kind() == "service_name") {
         Some(n) => node_text(n, source),
         None => return,
@@ -268,9 +268,10 @@ fn extract_service(
 
     for child in children(node) {
         if child.kind() == "rpc"
-            && let Some(sym) = extract_rpc(child, source, svc_idx) {
-                symbols.push(sym);
-            }
+            && let Some(sym) = extract_rpc(child, source, svc_idx)
+        {
+            symbols.push(sym);
+        }
     }
 }
 
@@ -452,10 +453,7 @@ import public "other.proto";
 "#,
         );
         assert_eq!(result.imports.len(), 2);
-        assert_eq!(
-            result.imports[0].source,
-            "google/protobuf/timestamp.proto"
-        );
+        assert_eq!(result.imports[0].source, "google/protobuf/timestamp.proto");
         assert!(!result.imports[0].is_reexport);
         assert_eq!(result.imports[1].source, "other.proto");
         assert!(result.imports[1].is_reexport);
@@ -506,11 +504,7 @@ message Outer {
             .iter()
             .position(|s| s.name == "Outer")
             .unwrap();
-        let inner = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "Inner")
-            .unwrap();
+        let inner = result.symbols.iter().find(|s| s.name == "Inner").unwrap();
         assert_eq!(inner.parent_idx, Some(outer_idx));
 
         let inner_idx = result
@@ -518,11 +512,7 @@ message Outer {
             .iter()
             .position(|s| s.name == "Inner")
             .unwrap();
-        let value_field = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "value")
-            .unwrap();
+        let value_field = result.symbols.iter().find(|s| s.name == "value").unwrap();
         assert_eq!(value_field.parent_idx, Some(inner_idx));
     }
 
@@ -584,21 +574,14 @@ service UserService {
         assert!(names.contains(&"CreateUser"));
 
         assert_eq!(result.imports.len(), 1);
-        assert_eq!(
-            result.imports[0].source,
-            "google/protobuf/timestamp.proto"
-        );
+        assert_eq!(result.imports[0].source, "google/protobuf/timestamp.proto");
 
         let user_idx = result
             .symbols
             .iter()
             .position(|s| s.name == "User")
             .unwrap();
-        let role_enum = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "Role")
-            .unwrap();
+        let role_enum = result.symbols.iter().find(|s| s.name == "Role").unwrap();
         assert_eq!(role_enum.parent_idx, Some(user_idx));
 
         let svc_idx = result
@@ -606,11 +589,7 @@ service UserService {
             .iter()
             .position(|s| s.name == "UserService")
             .unwrap();
-        let get_user = result
-            .symbols
-            .iter()
-            .find(|s| s.name == "GetUser")
-            .unwrap();
+        let get_user = result.symbols.iter().find(|s| s.name == "GetUser").unwrap();
         assert_eq!(get_user.parent_idx, Some(svc_idx));
     }
 }

@@ -162,9 +162,7 @@ fn extract_binding(
     }
 
     let value_node = find_binding_value(node);
-    let is_function = value_node
-        .map(|v| is_function_value(v))
-        .unwrap_or(false);
+    let is_function = value_node.map(|v| is_function_value(v)).unwrap_or(false);
 
     let kind = if is_function {
         SymbolKind::Function
@@ -288,24 +286,23 @@ fn extract_import(node: Node, source: &[u8], imports: &mut Vec<ExtractedImport>)
         false
     };
 
-    if is_import
-        && let Some(arg) = child_iter.next() {
-            let path = if arg.kind() == "path_expression" {
-                children(arg)
-                    .find(|n| n.kind() == "path_fragment")
-                    .map(|n| node_text(n, source))
-                    .unwrap_or_default()
-            } else {
-                node_text(arg, source)
-            };
-            if !path.is_empty() && (path.starts_with("./") || path.starts_with("../")) {
-                imports.push(ExtractedImport {
-                    source: path,
-                    specifiers: vec![],
-                    is_reexport: false,
-                });
-            }
+    if is_import && let Some(arg) = child_iter.next() {
+        let path = if arg.kind() == "path_expression" {
+            children(arg)
+                .find(|n| n.kind() == "path_fragment")
+                .map(|n| node_text(n, source))
+                .unwrap_or_default()
+        } else {
+            node_text(arg, source)
+        };
+        if !path.is_empty() && (path.starts_with("./") || path.starts_with("../")) {
+            imports.push(ExtractedImport {
+                source: path,
+                specifiers: vec![],
+                is_reexport: false,
+            });
         }
+    }
 }
 
 #[cfg(test)]

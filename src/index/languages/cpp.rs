@@ -87,14 +87,7 @@ fn extract_from_node(
             {
                 symbols.push(sym);
             }
-            extract_class_methods(
-                node,
-                source,
-                in_anonymous_ns,
-                symbols,
-                imports,
-                references,
-            );
+            extract_class_methods(node, source, in_anonymous_ns, symbols, imports, references);
             return;
         }
         "struct_specifier" => {
@@ -801,10 +794,7 @@ Config create() { Config c; return c; }
 "#,
         );
         assert!(
-            !result
-                .references
-                .iter()
-                .any(|r| r.name == "make_shared"),
+            !result.references.iter().any(|r| r.name == "make_shared"),
             "built-in calls must not be recorded as references"
         );
     }

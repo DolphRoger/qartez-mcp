@@ -142,11 +142,8 @@ pub fn resolve(conn: &Connection, profile: &LanguageProfile) -> Result<ResolvedT
         .iter()
         .filter_map(|g| glob::Pattern::new(g).ok())
         .collect();
-    let is_excluded = |path: &str| -> bool {
-        compiled_excludes
-            .iter()
-            .any(|pat| pat.matches(path))
-    };
+    let is_excluded =
+        |path: &str| -> bool { compiled_excludes.iter().any(|pat| pat.matches(path)) };
 
     // 1. Top file picker with two important safeguards:
     //
@@ -164,8 +161,8 @@ pub fn resolve(conn: &Connection, profile: &LanguageProfile) -> Result<ResolvedT
     //       most symbols instead of relying on SQLite's insertion
     //       order. On jackson-core this promotes `ParserMinimalBase`
     //       (140 symbols) over `create-test-report.sh` (zero symbols).
-    let all_ranked = get_all_files_ranked(conn)
-        .with_context(|| "load ranked files for target picker")?;
+    let all_ranked =
+        get_all_files_ranked(conn).with_context(|| "load ranked files for target picker")?;
     let first_ranked = all_ranked.first().with_context(|| {
         format!(
             "no ranked files in qartez database for profile {}",
@@ -287,13 +284,8 @@ pub fn resolve(conn: &Connection, profile: &LanguageProfile) -> Result<ResolvedT
             *acc.entry(s.name.as_str()).or_insert(0) += 1;
             acc
         });
-    let is_unique_fn = |name: &str| -> bool {
-        function_name_counts
-            .get(name)
-            .copied()
-            .unwrap_or(0)
-            == 1
-    };
+    let is_unique_fn =
+        |name: &str| -> bool { function_name_counts.get(name).copied().unwrap_or(0) == 1 };
     let smallest_fn: Option<(String, String)> = all_symbols
         .iter()
         .filter(|(s, path)| {
@@ -319,9 +311,7 @@ pub fn resolve(conn: &Connection, profile: &LanguageProfile) -> Result<ResolvedT
         unused_rows
             .into_iter()
             .filter(|(sym, file)| {
-                is_callable_kind(&sym.kind)
-                    && is_unique_fn(&sym.name)
-                    && !is_excluded(&file.path)
+                is_callable_kind(&sym.kind) && is_unique_fn(&sym.name) && !is_excluded(&file.path)
             })
             .min_by_key(|(sym, _)| {
                 (
@@ -348,9 +338,7 @@ pub fn resolve(conn: &Connection, profile: &LanguageProfile) -> Result<ResolvedT
     //    `helpers_benchmark_tmp.py` instead of the Rust-flavored `.rs`.
     let move_dest_ext = profile.extensions.first().copied().unwrap_or("rs");
     let move_dest_basename = format!("{MOVE_DEST_BASENAME}.{move_dest_ext}");
-    let (move_symbol, move_destination) = match smallest_unused_fn
-        .as_ref()
-        .or(smallest_fn.as_ref())
+    let (move_symbol, move_destination) = match smallest_unused_fn.as_ref().or(smallest_fn.as_ref())
     {
         Some((name, path)) => {
             let parent = parent_dir(path);

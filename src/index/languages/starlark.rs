@@ -289,13 +289,20 @@ mod tests {
 
     #[test]
     fn test_load_statement() {
-        let result =
-            parse_starlark(r#"load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary")"#);
+        let result = parse_starlark(r#"load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary")"#);
         assert_eq!(result.imports.len(), 1);
         assert_eq!(result.imports[0].source, "@rules_cc//cc:defs.bzl");
         assert_eq!(result.imports[0].specifiers.len(), 2);
-        assert!(result.imports[0].specifiers.contains(&"cc_library".to_string()));
-        assert!(result.imports[0].specifiers.contains(&"cc_binary".to_string()));
+        assert!(
+            result.imports[0]
+                .specifiers
+                .contains(&"cc_library".to_string())
+        );
+        assert!(
+            result.imports[0]
+                .specifiers
+                .contains(&"cc_binary".to_string())
+        );
     }
 
     #[test]
@@ -346,7 +353,11 @@ cc_binary(
         assert!(names.contains(&"mylib"));
         assert!(names.contains(&"myapp"));
 
-        let private_fn = result.symbols.iter().find(|s| s.name == "_check_deps").unwrap();
+        let private_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "_check_deps")
+            .unwrap();
         assert!(!private_fn.is_exported);
 
         assert_eq!(result.imports.len(), 1);
@@ -378,6 +389,11 @@ py_library(
         assert!(names.contains(&"core"));
         assert!(names.contains(&"core_test"));
         assert!(names.contains(&"utils"));
-        assert!(result.symbols.iter().all(|s| matches!(s.kind, SymbolKind::Target)));
+        assert!(
+            result
+                .symbols
+                .iter()
+                .all(|s| matches!(s.kind, SymbolKind::Target))
+        );
     }
 }

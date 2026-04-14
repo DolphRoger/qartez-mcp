@@ -106,9 +106,7 @@ fn extract_function_declaration(node: Node, source: &[u8]) -> Option<ExtractedSy
 
     // `local function foo()` is parsed as a `function_declaration` whose
     // first child token is the `local` keyword.
-    let is_local = node
-        .child(0)
-        .is_some_and(|c| c.kind() == "local");
+    let is_local = node.child(0).is_some_and(|c| c.kind() == "local");
 
     let (name, kind, is_exported) = match name_node.kind() {
         "identifier" => {
@@ -204,16 +202,16 @@ fn extract_local_assignment(
 
     // Check for `local function` by detecting an anonymous function_definition
     // in the RHS. Also check for `require(...)` calls.
-    let is_local_func = expr_list.is_some_and(|el| {
-        children(el).any(|c| c.kind() == "function_definition")
-    });
+    let is_local_func =
+        expr_list.is_some_and(|el| children(el).any(|c| c.kind() == "function_definition"));
 
     if let Some(el) = expr_list {
         for expr_child in children(el) {
             if expr_child.kind() == "function_call"
-                && let Some(imp) = extract_require_call(expr_child, source) {
-                    imports.push(imp);
-                }
+                && let Some(imp) = extract_require_call(expr_child, source)
+            {
+                imports.push(imp);
+            }
         }
     }
 
@@ -269,9 +267,10 @@ fn extract_top_level_assignment(
     if let Some(el) = expr_list {
         for expr_child in children(el) {
             if expr_child.kind() == "function_call"
-                && let Some(imp) = extract_require_call(expr_child, source) {
-                    imports.push(imp);
-                }
+                && let Some(imp) = extract_require_call(expr_child, source)
+            {
+                imports.push(imp);
+            }
         }
     }
 
@@ -473,15 +472,27 @@ return M
         assert_eq!(result.imports[0].source, "cjson");
         assert_eq!(result.imports[1].source, "utils");
 
-        let validate_sym = result.symbols.iter().find(|s| s.name == "validate").unwrap();
+        let validate_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "validate")
+            .unwrap();
         assert!(!validate_sym.is_exported);
         assert!(matches!(validate_sym.kind, SymbolKind::Function));
 
-        let global_sym = result.symbols.iter().find(|s| s.name == "global_setup").unwrap();
+        let global_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "global_setup")
+            .unwrap();
         assert!(global_sym.is_exported);
         assert!(matches!(global_sym.kind, SymbolKind::Function));
 
-        let method_sym = result.symbols.iter().find(|s| s.name == "M:process").unwrap();
+        let method_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "M:process")
+            .unwrap();
         assert!(matches!(method_sym.kind, SymbolKind::Method));
         assert!(method_sym.is_exported);
     }

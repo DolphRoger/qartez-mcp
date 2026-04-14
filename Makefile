@@ -1,42 +1,44 @@
-TARGET_DIR  = $(shell cargo metadata --no-deps --format-version 1 2>/dev/null | jq -r .target_directory)
-BINARY      = $(TARGET_DIR)/release/qartez-mcp
-GUARD_BIN   = $(TARGET_DIR)/release/qartez-guard
-SETUP_BIN   = $(TARGET_DIR)/release/qartez-setup
-INSTALL_DIR = $(HOME)/.local/bin
-BENCH_RUN    = cargo run --quiet --release --features benchmark --bin benchmark --
+CARGO       := $(shell command -v cargo 2>/dev/null || echo "$(HOME)/.cargo/bin/cargo")
+INSTALL_DIR  = $(HOME)/.local/bin
+TARGET_DIR   = $(or $(CARGO_TARGET_DIR),$(CURDIR)/target)
+BENCH_RUN    = $(CARGO) run --quiet --release --features benchmark --bin benchmark --
 BENCH_LANGS := rust typescript python go java
 
-.PHONY: help test build install deploy setup uninstall clean \
+.PHONY: help test test-install build install deploy setup uninstall clean \
         bench bench-all bench-fixtures
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
+deploy: ## Full deploy: install deps, build, test, install, configure IDEs
+	@./install.sh
+
 test: ## Run all tests
-	cargo test
+	$(CARGO) test
+
+test-install: ## Test install.sh portability (no build needed)
+	@./tests/test-install.sh
 
 build: ## Build release binaries
-	cargo build --release
+	@command -v cargo >/dev/null 2>&1 || [ -x $(HOME)/.cargo/bin/cargo ] || { \
+		echo "\033[1;31m[!]\033[0m Rust not found. Run './install.sh' or 'make deploy' for first-time setup."; \
+		exit 1; \
+	}
+	$(CARGO) build --release
 
 install: build ## Build and install binaries to ~/.local/bin
 	@mkdir -p $(INSTALL_DIR)
-	@cp $(BINARY) $(INSTALL_DIR)/qartez-mcp
-	@cp $(GUARD_BIN) $(INSTALL_DIR)/qartez-guard
-	@cp $(SETUP_BIN) $(INSTALL_DIR)/qartez-setup
-	@echo "\033[0;32m[+]\033[0m Binary: $(INSTALL_DIR)/qartez-mcp ($$(wc -c < $(BINARY) | awk '{printf "%.1f MB", $$1/1048576}'))"
-	@echo "\033[0;32m[+]\033[0m Binary: $(INSTALL_DIR)/qartez-guard ($$(wc -c < $(GUARD_BIN) | awk '{printf "%.1f MB", $$1/1048576}'))"
-	@echo "\033[0;32m[+]\033[0m Binary: $(INSTALL_DIR)/qartez-setup ($$(wc -c < $(SETUP_BIN) | awk '{printf "%.1f MB", $$1/1048576}'))"
+	@for bin in qartez-mcp qartez-guard qartez-setup; do \
+		cp $(TARGET_DIR)/release/$$bin $(INSTALL_DIR)/$$bin; \
+		if [ "$$(uname)" = "Darwin" ]; then \
+			codesign -s - -f $(INSTALL_DIR)/$$bin 2>/dev/null || true; \
+		fi; \
+		echo "\033[0;32m[+]\033[0m Binary: $(INSTALL_DIR)/$$bin ($$(wc -c < $(TARGET_DIR)/release/$$bin | awk '{printf "%.1f MB", $$1/1048576}'))"; \
+	done
 
-deploy: install ## Full deploy: test, build, install, configure all detected IDEs
-	@echo "\033[1;34m==>\033[0m Running tests..."
-	@bash -c 'set -o pipefail; cargo test --quiet 2>&1 | grep -E "^(running|test result)"'
-	@echo "\033[1;34m==>\033[0m Configuring all detected IDEs..."
-	@$(INSTALL_DIR)/qartez-setup --yes
-	@echo "\033[0;32m[+]\033[0m Deploy complete. Restart IDEs to pick up MCP changes."
-
-setup: install ## Interactive IDE setup wizard (build + auto-detect)
-	@$(INSTALL_DIR)/qartez-setup
+setup: ## Interactive IDE setup wizard (install deps + build + choose IDEs)
+	@./install.sh --interactive
 
 uninstall: ## Remove qartez from all IDEs and uninstall binaries
 	@$(INSTALL_DIR)/qartez-setup --uninstall 2>/dev/null || true
@@ -44,7 +46,7 @@ uninstall: ## Remove qartez from all IDEs and uninstall binaries
 	@echo "\033[0;32m[+]\033[0m Binaries removed: $(INSTALL_DIR)/qartez-{mcp,guard,setup}"
 
 clean: ## Remove build artifacts
-	cargo clean
+	$(CARGO) clean
 
 # --- Benchmarks ---
 
@@ -71,4 +73,3 @@ bench-all: bench-fixtures ## Run all languages + cross-language summary
 
 bench-fixtures: ## Clone and index fixture repos for non-Rust benchmarks
 	@./scripts/setup-benchmark-fixtures.sh all
-

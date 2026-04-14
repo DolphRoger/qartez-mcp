@@ -25,7 +25,14 @@ impl LanguageSupport for KotlinSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -114,7 +121,7 @@ fn extract_from_node(
     }
 }
 
-fn count_complexity(node: Node, source: &[u8]) -> u32 {
+fn count_complexity(node: Node, _source: &[u8]) -> u32 {
     let mut total = match node.kind() {
         "if_expression" => 1,
         "when_entry" => 1,
@@ -128,7 +135,7 @@ fn count_complexity(node: Node, source: &[u8]) -> u32 {
         _ => 0,
     };
     for child in children(node) {
-        total += count_complexity(child, source);
+        total += count_complexity(child, _source);
     }
     total
 }
@@ -162,7 +169,10 @@ fn extract_named_decl(node: Node, source: &[u8], kind: SymbolKind) -> Option<Ext
     })
 }
 
-#[expect(clippy::only_used_in_recursion, reason = "enclosing is the fallback for unnamed nested declarations")]
+#[expect(
+    clippy::only_used_in_recursion,
+    reason = "enclosing is the fallback for unnamed nested declarations"
+)]
 fn extract_class_body(
     class_node: Node,
     source: &[u8],
@@ -303,10 +313,7 @@ fn record_reference(
         }
         "user_type" | "type_identifier" => {
             let parent_kind = node.parent().map(|p| p.kind()).unwrap_or("");
-            if matches!(
-                parent_kind,
-                "class_declaration" | "object_declaration"
-            ) {
+            if matches!(parent_kind, "class_declaration" | "object_declaration") {
                 return;
             }
             // user_type wraps an identifier child in tree-sitter-kotlin-ng
@@ -461,7 +468,11 @@ fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
         return None;
     }
 
-    let truncated = if sig.len() > 200 { &sig[..sig.floor_char_boundary(200)] } else { sig };
+    let truncated = if sig.len() > 200 {
+        &sig[..sig.floor_char_boundary(200)]
+    } else {
+        sig
+    };
     Some(truncated.to_string())
 }
 
@@ -690,10 +701,7 @@ fun demo() {
             !ref_names.contains(&"println"),
             "println should be filtered"
         );
-        assert!(
-            !ref_names.contains(&"listOf"),
-            "listOf should be filtered"
-        );
+        assert!(!ref_names.contains(&"listOf"), "listOf should be filtered");
         assert!(!ref_names.contains(&"Int"), "Int should be filtered");
         assert!(!ref_names.contains(&"String"), "String should be filtered");
     }

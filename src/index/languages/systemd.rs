@@ -7,10 +7,8 @@ use crate::index::symbols::{ExtractedSymbol, ParseResult, SymbolKind};
 
 pub struct SystemdSupport;
 
-static SECTION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\[(\w+)\]").unwrap());
-static KEY_VALUE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\w+)\s*=\s*(.*)$").unwrap());
+static SECTION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[(\w+)\]").unwrap());
+static KEY_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\w+)\s*=\s*(.*)$").unwrap());
 
 const IMPORTANT_KEYS: &[&str] = &[
     "Description",
@@ -108,9 +106,10 @@ impl LanguageSupport for SystemdSupport {
                 let value = cap[2].trim().to_string();
 
                 if key == "Description"
-                    && let Some(idx) = current_section_idx {
-                        symbols[idx].signature = Some(value.clone());
-                    }
+                    && let Some(idx) = current_section_idx
+                {
+                    symbols[idx].signature = Some(value.clone());
+                }
 
                 if !IMPORTANT_KEYS.contains(&key.as_str()) {
                     continue;
@@ -145,9 +144,7 @@ impl LanguageSupport for SystemdSupport {
             .collect();
 
         for (pos, &sec_idx) in section_indices.iter().enumerate() {
-            let next_section_start = section_indices
-                .get(pos + 1)
-                .map(|&i| symbols[i].line_start);
+            let next_section_start = section_indices.get(pos + 1).map(|&i| symbols[i].line_start);
 
             let max_child_line = symbols
                 .iter()
@@ -197,17 +194,22 @@ mod tests {
     #[test]
     fn test_exec_start() {
         let result = parse_systemd("[Service]\nExecStart=/usr/bin/myapp --flag\n");
-        let exec = result.symbols.iter().find(|s| s.name == "ExecStart").unwrap();
+        let exec = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "ExecStart")
+            .unwrap();
         assert!(matches!(exec.kind, SymbolKind::Function));
-        assert_eq!(exec.signature.as_deref(), Some("ExecStart=/usr/bin/myapp --flag"));
+        assert_eq!(
+            exec.signature.as_deref(),
+            Some("ExecStart=/usr/bin/myapp --flag")
+        );
         assert_eq!(exec.parent_idx, Some(0));
     }
 
     #[test]
     fn test_key_value_pairs() {
-        let result = parse_systemd(
-            "[Service]\nType=simple\nRestart=always\nUser=nobody\n",
-        );
+        let result = parse_systemd("[Service]\nType=simple\nRestart=always\nUser=nobody\n");
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Type"));
         assert!(names.contains(&"Restart"));
@@ -232,7 +234,11 @@ mod tests {
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Install"));
         assert!(names.contains(&"WantedBy"));
-        let wanted = result.symbols.iter().find(|s| s.name == "WantedBy").unwrap();
+        let wanted = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "WantedBy")
+            .unwrap();
         assert_eq!(
             wanted.signature.as_deref(),
             Some("WantedBy=multi-user.target")
@@ -249,9 +255,8 @@ mod tests {
 
     #[test]
     fn test_comments_skipped() {
-        let result = parse_systemd(
-            "# This is a comment\n; Another comment\n[Unit]\nDescription=Test\n",
-        );
+        let result =
+            parse_systemd("# This is a comment\n; Another comment\n[Unit]\nDescription=Test\n");
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(!names.iter().any(|n| n.contains('#') || n.contains(';')));
         assert!(names.contains(&"Unit"));
@@ -309,10 +314,18 @@ WantedBy=multi-user.target
             .iter()
             .position(|s| s.name == "Service")
             .unwrap();
-        let exec_start = result.symbols.iter().find(|s| s.name == "ExecStart").unwrap();
+        let exec_start = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "ExecStart")
+            .unwrap();
         assert_eq!(exec_start.parent_idx, Some(service_idx));
 
-        let wanted = result.symbols.iter().find(|s| s.name == "WantedBy").unwrap();
+        let wanted = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "WantedBy")
+            .unwrap();
         let install_idx = result
             .symbols
             .iter()
@@ -344,11 +357,19 @@ WantedBy=timers.target
             .collect();
         assert_eq!(section_names, &["Unit", "Timer", "Install"]);
 
-        let on_cal = result.symbols.iter().find(|s| s.name == "OnCalendar").unwrap();
+        let on_cal = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "OnCalendar")
+            .unwrap();
         assert!(matches!(on_cal.kind, SymbolKind::Variable));
         assert_eq!(on_cal.signature.as_deref(), Some("OnCalendar=hourly"));
 
-        let persistent = result.symbols.iter().find(|s| s.name == "Persistent").unwrap();
+        let persistent = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Persistent")
+            .unwrap();
         assert!(matches!(persistent.kind, SymbolKind::Variable));
     }
 }

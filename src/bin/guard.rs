@@ -122,15 +122,14 @@ fn run() -> anyhow::Result<()> {
     // so Claude sees exactly which symbols the guard thinks are load-bearing
     // before it decides to call `qartez_impact`. Fail-open: an error here must
     // never block the edit, so swallow and continue with an empty list.
-    let hot_symbols: Vec<(String, f64)> =
-        read::get_symbols_ranked_for_file(&conn, file_row.id, 3)
-            .map(|rows| {
-                rows.into_iter()
-                    .filter(|s| s.pagerank > 0.0)
-                    .map(|s| (s.name, s.pagerank))
-                    .collect()
-            })
-            .unwrap_or_default();
+    let hot_symbols: Vec<(String, f64)> = read::get_symbols_ranked_for_file(&conn, file_row.id, 3)
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|s| s.pagerank > 0.0)
+                .map(|s| (s.name, s.pagerank))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let facts = FileFacts {
         rel_path: rel_path.clone(),
@@ -166,10 +165,7 @@ fn merge_config(cli: &Cli) -> GuardConfig {
     cfg
 }
 
-fn resolve_project_root(
-    hook_cwd: Option<&str>,
-    file_path: &std::path::Path,
-) -> Option<PathBuf> {
+fn resolve_project_root(hook_cwd: Option<&str>, file_path: &std::path::Path) -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var("CLAUDE_PROJECT_DIR")
         && !explicit.is_empty()
     {

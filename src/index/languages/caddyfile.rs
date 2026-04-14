@@ -12,8 +12,7 @@ pub struct CaddyfileSupport;
 // blocks. No tree-sitter grammar exists, so this parser uses regex
 // (same strategy as the Dockerfile parser).
 
-static SNIPPET_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\((\w+)\)\s*\{").unwrap());
+static SNIPPET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\((\w+)\)\s*\{").unwrap());
 
 static HANDLE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s+(handle(?:_path)?)\s+(\S+)").unwrap());
@@ -21,29 +20,47 @@ static HANDLE_RE: LazyLock<Regex> =
 static REVERSE_PROXY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s+reverse_proxy\s+(.+)$").unwrap());
 
-static RESPOND_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s+respond\s+(.+)$").unwrap());
+static RESPOND_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s+respond\s+(.+)$").unwrap());
 
-static IMPORT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*import\s+(.+)$").unwrap());
+static IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*import\s+(.+)$").unwrap());
 
-static NAMED_MATCHER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s+@(\w+)").unwrap());
+static NAMED_MATCHER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s+@(\w+)").unwrap());
 
 static DIRECTIVE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s+(tls|log|encode)\b(.*)$").unwrap());
 
 // Matches a site address at depth 0: hostname with dot/colon, or `localhost`,
 // or a bare port like `:8080`.
-static SITE_ADDR_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\S+)\s*\{?\s*$").unwrap());
+static SITE_ADDR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\S+)\s*\{?\s*$").unwrap());
 
 // Caddy directive keywords that should not be treated as site addresses.
 const CADDY_DIRECTIVES: &[&str] = &[
-    "tls", "log", "encode", "handle", "handle_path", "reverse_proxy", "respond",
-    "redir", "rewrite", "header", "basicauth", "file_server", "root", "php_fastcgi",
-    "templates", "try_files", "import", "route", "vars", "bind", "abort", "error",
-    "map", "acme_server", "metrics", "tracing",
+    "tls",
+    "log",
+    "encode",
+    "handle",
+    "handle_path",
+    "reverse_proxy",
+    "respond",
+    "redir",
+    "rewrite",
+    "header",
+    "basicauth",
+    "file_server",
+    "root",
+    "php_fastcgi",
+    "templates",
+    "try_files",
+    "import",
+    "route",
+    "vars",
+    "bind",
+    "abort",
+    "error",
+    "map",
+    "acme_server",
+    "metrics",
+    "tracing",
 ];
 
 /// Returns true when `token` looks like a Caddyfile site address rather than
@@ -57,7 +74,12 @@ fn is_site_address(token: &str) -> bool {
     if token.starts_with('(') {
         return false;
     }
-    token.contains('.') || token.contains(':') || token == "localhost" || token == "http://" || token.starts_with("http://") || token.starts_with("https://")
+    token.contains('.')
+        || token.contains(':')
+        || token == "localhost"
+        || token == "http://"
+        || token.starts_with("http://")
+        || token.starts_with("https://")
 }
 
 impl LanguageSupport for CaddyfileSupport {
@@ -113,7 +135,9 @@ impl LanguageSupport for CaddyfileSupport {
                         unused_excluded: false,
                         complexity: None,
                     });
-                    depth = depth.saturating_add(open_braces).saturating_sub(close_braces);
+                    depth = depth
+                        .saturating_add(open_braces)
+                        .saturating_sub(close_braces);
                     continue;
                 }
 
@@ -124,7 +148,9 @@ impl LanguageSupport for CaddyfileSupport {
                         specifiers: Vec::new(),
                         is_reexport: false,
                     });
-                    depth = depth.saturating_add(open_braces).saturating_sub(close_braces);
+                    depth = depth
+                        .saturating_add(open_braces)
+                        .saturating_sub(close_braces);
                     continue;
                 }
 
@@ -225,14 +251,17 @@ impl LanguageSupport for CaddyfileSupport {
                 }
             }
 
-            depth = depth.saturating_add(open_braces).saturating_sub(close_braces);
+            depth = depth
+                .saturating_add(open_braces)
+                .saturating_sub(close_braces);
 
             // Update the end line of the current site block when we return
             // to depth 0.
             if depth == 0
-                && let Some(idx) = current_site_idx.take() {
-                    symbols[idx].line_end = line_num;
-                }
+                && let Some(idx) = current_site_idx.take()
+            {
+                symbols[idx].line_end = line_num;
+            }
         }
 
         ParseResult {
@@ -259,9 +288,7 @@ mod tests {
 
     #[test]
     fn test_site_block() {
-        let result = parse_caddyfile(
-            "example.com {\n    respond \"Hello\"\n}\n",
-        );
+        let result = parse_caddyfile("example.com {\n    respond \"Hello\"\n}\n");
         assert_eq!(result.symbols.len(), 2);
         assert_eq!(result.symbols[0].name, "example.com");
         assert!(matches!(result.symbols[0].kind, SymbolKind::Class));
@@ -272,13 +299,15 @@ mod tests {
 
     #[test]
     fn test_reverse_proxy() {
-        let result = parse_caddyfile(
-            "api.example.com {\n    reverse_proxy localhost:8080\n}\n",
-        );
+        let result = parse_caddyfile("api.example.com {\n    reverse_proxy localhost:8080\n}\n");
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"api.example.com"));
         assert!(names.iter().any(|n| n.contains("localhost:8080")));
-        let rp = result.symbols.iter().find(|s| s.name.contains("reverse_proxy")).unwrap();
+        let rp = result
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("reverse_proxy"))
+            .unwrap();
         assert!(matches!(rp.kind, SymbolKind::Variable));
     }
 
@@ -288,16 +317,22 @@ mod tests {
             "example.com {\n    handle_path /api/* {\n        reverse_proxy backend:3000\n    }\n}\n",
         );
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.iter().any(|n| n.contains("handle_path") && n.contains("/api/*")));
-        let hp = result.symbols.iter().find(|s| s.name.contains("handle_path")).unwrap();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.contains("handle_path") && n.contains("/api/*"))
+        );
+        let hp = result
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("handle_path"))
+            .unwrap();
         assert!(matches!(hp.kind, SymbolKind::Function));
     }
 
     #[test]
     fn test_snippet() {
-        let result = parse_caddyfile(
-            "(common_headers) {\n    header X-Frame-Options DENY\n}\n",
-        );
+        let result = parse_caddyfile("(common_headers) {\n    header X-Frame-Options DENY\n}\n");
         assert_eq!(result.symbols[0].name, "(common_headers)");
         assert!(matches!(result.symbols[0].kind, SymbolKind::Function));
         assert!(result.symbols[0].is_exported);
@@ -310,15 +345,18 @@ mod tests {
         );
         let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"@websockets"));
-        let matcher = result.symbols.iter().find(|s| s.name == "@websockets").unwrap();
+        let matcher = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "@websockets")
+            .unwrap();
         assert!(matches!(matcher.kind, SymbolKind::Variable));
     }
 
     #[test]
     fn test_import() {
-        let result = parse_caddyfile(
-            "import common_headers\nexample.com {\n    respond \"OK\"\n}\n",
-        );
+        let result =
+            parse_caddyfile("import common_headers\nexample.com {\n    respond \"OK\"\n}\n");
         assert_eq!(result.imports.len(), 1);
         assert_eq!(result.imports[0].source, "common_headers");
     }
@@ -375,8 +413,16 @@ localhost:8080 {
         assert!(names.contains(&"localhost:8080"));
 
         // Directives inside example.com
-        assert!(names.iter().any(|n| n.contains("handle_path") && n.contains("/api/*")));
-        assert!(names.iter().any(|n| n.contains("handle") && n.contains("/static/*")));
+        assert!(
+            names
+                .iter()
+                .any(|n| n.contains("handle_path") && n.contains("/api/*"))
+        );
+        assert!(
+            names
+                .iter()
+                .any(|n| n.contains("handle") && n.contains("/static/*"))
+        );
         assert!(names.iter().any(|n| n.contains("reverse_proxy")));
         assert!(names.iter().any(|n| n.contains("tls")));
         assert!(names.contains(&"@websockets"));

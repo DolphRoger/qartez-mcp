@@ -4,7 +4,7 @@ use std::fs;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-use qartez_mcp::git::cochange::{analyze_cochanges, CoChangeConfig};
+use qartez_mcp::git::cochange::{CoChangeConfig, analyze_cochanges};
 use qartez_mcp::graph::{blast, leiden, pagerank, wiki};
 use qartez_mcp::index;
 use qartez_mcp::storage::{models::SymbolInsert, read, schema, write};
@@ -51,12 +51,8 @@ fn test_unused_exports_fallback_must_respect_symbol_refs() {
     let lib = insert_file(&conn, "src/lib.rs");
     let consumer = insert_file(&conn, "src/consumer.rs");
 
-    let lib_ids = write::insert_symbols(
-        &conn,
-        lib,
-        &[sym("Config", "struct", 1, 5, true)],
-    )
-    .unwrap();
+    let lib_ids =
+        write::insert_symbols(&conn, lib, &[sym("Config", "struct", 1, 5, true)]).unwrap();
 
     let consumer_ids = write::insert_symbols(
         &conn,
@@ -105,12 +101,7 @@ fn test_unused_exports_materialized_equals_fallback() {
         ],
     )
     .unwrap();
-    write::insert_symbols(
-        &conn,
-        orphan,
-        &[sym("OrphanFn", "function", 1, 5, true)],
-    )
-    .unwrap();
+    write::insert_symbols(&conn, orphan, &[sym("OrphanFn", "function", 1, 5, true)]).unwrap();
 
     // File-level edge: someone imports lib, so its exports are "used" at
     // the file level.
@@ -249,7 +240,10 @@ fn test_sanitize_fts_plain_passthrough() {
 #[test]
 fn test_sanitize_fts_all_special() {
     let result = read::sanitize_fts_query("@#$%");
-    assert!(result.starts_with('"'), "all-special chars should be quoted");
+    assert!(
+        result.starts_with('"'),
+        "all-special chars should be quoted"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -429,8 +423,7 @@ fn test_cochange_self_reference() {
 
 #[test]
 fn test_pagerank_single_node_no_edges() {
-    let ranks =
-        pagerank::pagerank_raw(&[1], &[], &pagerank::PageRankConfig::default());
+    let ranks = pagerank::pagerank_raw(&[1], &[], &pagerank::PageRankConfig::default());
     assert_eq!(ranks.len(), 1);
     let rank = ranks[&1];
     assert!(
@@ -476,11 +469,7 @@ fn test_pagerank_duplicate_edges_deduped() {
 
 #[test]
 fn test_pagerank_all_dangling_equal_rank() {
-    let ranks = pagerank::pagerank_raw(
-        &[1, 2, 3],
-        &[],
-        &pagerank::PageRankConfig::default(),
-    );
+    let ranks = pagerank::pagerank_raw(&[1, 2, 3], &[], &pagerank::PageRankConfig::default());
     let expected = 1.0 / 3.0;
     for &id in &[1, 2, 3] {
         assert!(
@@ -508,11 +497,8 @@ fn test_pagerank_ranks_sum_to_one_complex_graph() {
 #[test]
 fn test_pagerank_nodes_not_in_edges_still_get_rank() {
     // Node 99 has no edges at all but is in the node list.
-    let ranks = pagerank::pagerank_raw(
-        &[1, 2, 99],
-        &[(1, 2)],
-        &pagerank::PageRankConfig::default(),
-    );
+    let ranks =
+        pagerank::pagerank_raw(&[1, 2, 99], &[(1, 2)], &pagerank::PageRankConfig::default());
     assert!(ranks.contains_key(&99), "isolated node should have a rank");
     assert!(ranks[&99] > 0.0, "isolated node should have positive rank");
 }
@@ -606,16 +592,14 @@ fn test_blast_radius_self_import() {
 
 #[test]
 fn test_leiden_empty_graph() {
-    let (assignments, modularity) =
-        leiden::leiden_raw(&[], &[], &leiden::LeidenConfig::default());
+    let (assignments, modularity) = leiden::leiden_raw(&[], &[], &leiden::LeidenConfig::default());
     assert!(assignments.is_empty());
     assert_eq!(modularity, 0.0);
 }
 
 #[test]
 fn test_leiden_single_node() {
-    let (assignments, _) =
-        leiden::leiden_raw(&[1], &[], &leiden::LeidenConfig::default());
+    let (assignments, _) = leiden::leiden_raw(&[1], &[], &leiden::LeidenConfig::default());
     assert_eq!(assignments.len(), 1);
     assert!(assignments.contains_key(&1));
 }
@@ -625,8 +609,12 @@ fn test_leiden_two_disconnected_cliques() {
     // Clique 1: 1-2-3, Clique 2: 4-5-6
     let nodes: Vec<i64> = (1..=6).collect();
     let edges = vec![
-        (1, 2), (2, 3), (1, 3), // clique 1
-        (4, 5), (5, 6), (4, 6), // clique 2
+        (1, 2),
+        (2, 3),
+        (1, 3), // clique 1
+        (4, 5),
+        (5, 6),
+        (4, 6), // clique 2
     ];
     let (assignments, modularity) =
         leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
@@ -639,15 +627,22 @@ fn test_leiden_two_disconnected_cliques() {
     assert_eq!(assignments[&5], assignments[&6]);
     // The two cliques should be in different clusters.
     assert_ne!(assignments[&1], assignments[&4]);
-    assert!(modularity > 0.0, "non-trivial graph should have positive modularity");
+    assert!(
+        modularity > 0.0,
+        "non-trivial graph should have positive modularity"
+    );
 }
 
 #[test]
 fn test_leiden_deterministic() {
     let nodes: Vec<i64> = (1..=8).collect();
     let edges = vec![
-        (1, 2), (2, 3), (1, 3),
-        (4, 5), (5, 6), (4, 6),
+        (1, 2),
+        (2, 3),
+        (1, 3),
+        (4, 5),
+        (5, 6),
+        (4, 6),
         (7, 8),
         (3, 4), // bridge
     ];
@@ -687,10 +682,8 @@ fn test_symbol_refs_multiple_referrers() {
 
     let lib_ids =
         write::insert_symbols(&conn, lib, &[sym("SharedType", "struct", 1, 10, true)]).unwrap();
-    let a_ids =
-        write::insert_symbols(&conn, a, &[sym("fn_a", "function", 1, 5, false)]).unwrap();
-    let b_ids =
-        write::insert_symbols(&conn, b, &[sym("fn_b", "function", 1, 5, false)]).unwrap();
+    let a_ids = write::insert_symbols(&conn, a, &[sym("fn_a", "function", 1, 5, false)]).unwrap();
+    let b_ids = write::insert_symbols(&conn, b, &[sym("fn_b", "function", 1, 5, false)]).unwrap();
 
     write::insert_symbol_refs(
         &conn,
@@ -781,8 +774,7 @@ fn test_symbols_ranked_global() {
     let f2 = insert_file(&conn, "b.rs");
 
     let ids1 = write::insert_symbols(&conn, f1, &[sym("top", "struct", 1, 5, true)]).unwrap();
-    let ids2 =
-        write::insert_symbols(&conn, f2, &[sym("bottom", "function", 1, 3, true)]).unwrap();
+    let ids2 = write::insert_symbols(&conn, f2, &[sym("bottom", "function", 1, 3, true)]).unwrap();
 
     write::update_symbol_pagerank(&conn, ids1[0], 0.8).unwrap();
     write::update_symbol_pagerank(&conn, ids2[0], 0.2).unwrap();
@@ -891,8 +883,7 @@ fn test_delete_file_cascades_symbol_refs() {
     let f2 = insert_file(&conn, "b.rs");
 
     let ids1 = write::insert_symbols(&conn, f1, &[sym("target", "struct", 1, 5, true)]).unwrap();
-    let ids2 =
-        write::insert_symbols(&conn, f2, &[sym("caller", "function", 1, 3, false)]).unwrap();
+    let ids2 = write::insert_symbols(&conn, f2, &[sym("caller", "function", 1, 3, false)]).unwrap();
 
     write::insert_symbol_refs(&conn, &[(ids2[0], ids1[0], "call")]).unwrap();
     write::insert_edge(&conn, f2, f1, "import", None).unwrap();
@@ -900,10 +891,7 @@ fn test_delete_file_cascades_symbol_refs() {
     write::delete_file_data(&conn, f1).unwrap();
 
     // Symbols, edges, and symbol_refs should all be gone.
-    assert_eq!(
-        read::get_symbols_for_file(&conn, f1).unwrap().len(),
-        0
-    );
+    assert_eq!(read::get_symbols_for_file(&conn, f1).unwrap().len(), 0);
     assert!(read::get_all_edges(&conn).unwrap().is_empty());
     assert_eq!(read::get_all_symbol_refs(&conn).unwrap().len(), 0);
 }
@@ -1039,7 +1027,9 @@ fn test_end_to_end_pipeline() {
     assert!(ranked[0].pagerank > 0.0);
 
     // 3. Blast radius
-    let core = read::get_file_by_path(&conn, "src/core.ts").unwrap().unwrap();
+    let core = read::get_file_by_path(&conn, "src/core.ts")
+        .unwrap()
+        .unwrap();
     let blast_result = blast::blast_radius_for_file(&conn, core.id).unwrap();
     assert!(
         blast_result.transitive_count >= 2,
@@ -1050,7 +1040,10 @@ fn test_end_to_end_pipeline() {
     write::populate_unused_exports(&conn).unwrap();
     let count = read::count_unused_exports(&conn).unwrap();
     // coreHelper is exported but not imported by anyone.
-    assert!(count >= 1, "should have at least one unused export (coreHelper)");
+    assert!(
+        count >= 1,
+        "should have at least one unused export (coreHelper)"
+    );
 
     // 5. Wiki
     let config = wiki::WikiConfig {
@@ -1229,11 +1222,7 @@ fn test_index_mixed_languages() {
         "export function tsFn(): number { return 1; }\n",
     )
     .unwrap();
-    fs::write(
-        src.join("utils.py"),
-        "def py_fn():\n    return 1\n",
-    )
-    .unwrap();
+    fs::write(src.join("utils.py"), "def py_fn():\n    return 1\n").unwrap();
     fs::write(
         src.join("main.go"),
         "package main\n\nfunc GoFn() int {\n    return 1\n}\n",
@@ -1279,7 +1268,9 @@ fn test_get_or_create_file_idempotent() {
     let id2 = write::get_or_create_file(&conn, "src/new.rs").unwrap();
     assert_eq!(id1, id2);
 
-    let file = read::get_file_by_path(&conn, "src/new.rs").unwrap().unwrap();
+    let file = read::get_file_by_path(&conn, "src/new.rs")
+        .unwrap()
+        .unwrap();
     assert_eq!(file.language, "rust");
 }
 
@@ -1320,12 +1311,7 @@ fn test_symbol_pagerank_computation() {
     let f1 = insert_file(&conn, "a.rs");
     let f2 = insert_file(&conn, "b.rs");
 
-    let ids1 = write::insert_symbols(
-        &conn,
-        f1,
-        &[sym("callee", "function", 1, 5, true)],
-    )
-    .unwrap();
+    let ids1 = write::insert_symbols(&conn, f1, &[sym("callee", "function", 1, 5, true)]).unwrap();
     let ids2 = write::insert_symbols(
         &conn,
         f2,
@@ -1338,10 +1324,7 @@ fn test_symbol_pagerank_computation() {
 
     write::insert_symbol_refs(
         &conn,
-        &[
-            (ids2[0], ids1[0], "call"),
-            (ids2[1], ids1[0], "call"),
-        ],
+        &[(ids2[0], ids1[0], "call"), (ids2[1], ids1[0], "call")],
     )
     .unwrap();
 
@@ -1460,12 +1443,7 @@ fn test_rebuild_bodies_single_line_symbol() {
 
     let conn = setup();
     let f = write::upsert_file(&conn, "src/lib.rs", 1000, 100, "rust", 1).unwrap();
-    write::insert_symbols(
-        &conn,
-        f,
-        &[sym("X", "constant", 1, 1, true)],
-    )
-    .unwrap();
+    write::insert_symbols(&conn, f, &[sym("X", "constant", 1, 1, true)]).unwrap();
 
     write::rebuild_symbol_bodies(&conn, dir.path()).unwrap();
 
@@ -1494,12 +1472,7 @@ fn test_rebuild_bodies_line_range_past_eof() {
     let conn = setup();
     let f = write::upsert_file(&conn, "src/short.rs", 1000, 100, "rust", 2).unwrap();
     // Symbol claims to span lines 1-100, but file only has 2 lines.
-    write::insert_symbols(
-        &conn,
-        f,
-        &[sym("overflow", "function", 1, 100, true)],
-    )
-    .unwrap();
+    write::insert_symbols(&conn, f, &[sym("overflow", "function", 1, 100, true)]).unwrap();
 
     write::rebuild_symbol_bodies(&conn, dir.path()).unwrap();
 
@@ -1526,7 +1499,10 @@ fn test_rebuild_bodies_missing_file_skipped() {
     write::rebuild_symbol_bodies(&conn, dir.path()).unwrap();
 
     let results = read::search_symbol_bodies_fts(&conn, "ghost", 10).unwrap();
-    assert!(results.is_empty(), "missing file should be silently skipped");
+    assert!(
+        results.is_empty(),
+        "missing file should be silently skipped"
+    );
 }
 
 // ===========================================================================
@@ -1753,7 +1729,11 @@ fn test_blast_radius_diamond_dependency() {
         result.transitive_count, 3,
         "bottom of diamond should have blast radius 3 (left, right, top)"
     );
-    assert_eq!(result.direct_importers.len(), 2, "left and right import bottom directly");
+    assert_eq!(
+        result.direct_importers.len(),
+        2,
+        "left and right import bottom directly"
+    );
 }
 
 // ===========================================================================
@@ -1775,7 +1755,9 @@ fn test_analyze_cochanges_file_count_filtering() {
             fs::write(&path, format!("content of {f}")).unwrap();
         }
         let mut index = repo.index().unwrap();
-        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
@@ -1785,7 +1767,8 @@ fn test_analyze_cochanges_file_count_filtering() {
             Err(_) => vec![],
         };
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap();
     };
 
     // Commit 1: 2 files (within default min=2, max=20).
@@ -1811,11 +1794,18 @@ fn test_analyze_cochanges_file_count_filtering() {
     // c.rs may or may not exist as a file row — but it should NOT have cochanges.
     if let Some(c_row) = c {
         let cochanges = read::get_cochanges(&conn, c_row.id, 10).unwrap();
-        assert!(cochanges.is_empty(), "single-file commit should not produce cochanges");
+        assert!(
+            cochanges.is_empty(),
+            "single-file commit should not produce cochanges"
+        );
     }
 
     let a_cochanges = read::get_cochanges(&conn, a.unwrap().id, 10).unwrap();
-    assert_eq!(a_cochanges.len(), 1, "a.rs and b.rs should be co-change partners");
+    assert_eq!(
+        a_cochanges.len(),
+        1,
+        "a.rs and b.rs should be co-change partners"
+    );
 }
 
 // ===========================================================================
@@ -1836,7 +1826,9 @@ fn test_analyze_cochanges_dotfile_filtered() {
             fs::write(&path, format!("content of {f}")).unwrap();
         }
         let mut index = repo.index().unwrap();
-        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
@@ -1846,7 +1838,8 @@ fn test_analyze_cochanges_dotfile_filtered() {
             Err(_) => vec![],
         };
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap();
     };
 
     // Commit with a dotfile (.gitignore) and two normal files.
@@ -1886,7 +1879,9 @@ fn test_analyze_cochanges_subdirectory_dotfile_not_filtered() {
             fs::write(&path, format!("content of {f}")).unwrap();
         }
         let mut index = repo.index().unwrap();
-        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
@@ -1896,16 +1891,13 @@ fn test_analyze_cochanges_subdirectory_dotfile_not_filtered() {
             Err(_) => vec![],
         };
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap();
     };
 
     // ".github/ci.yml" — the filename is "ci.yml" (not dotfile), but
     // the DIRECTORY starts with dot. Only the filename is checked.
-    make_commit(
-        &repo,
-        &[".github/ci.yml", "src/main.rs"],
-        "github ci",
-    );
+    make_commit(&repo, &[".github/ci.yml", "src/main.rs"], "github ci");
 
     let conn = setup();
     analyze_cochanges(&conn, dir.path(), &CoChangeConfig::default()).unwrap();
@@ -1957,8 +1949,7 @@ fn test_leiden_star_topology() {
     let nodes: Vec<i64> = (1..=5).collect();
     let edges = vec![(1, 2), (1, 3), (1, 4), (1, 5)];
 
-    let (assignments, _) =
-        leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
+    let (assignments, _) = leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
 
     assert_eq!(assignments.len(), 5);
     // Star graph — Louvain tends to put everything in one cluster.
@@ -1976,14 +1967,17 @@ fn test_leiden_self_loops_only() {
     let nodes: Vec<i64> = (1..=3).collect();
     let edges = vec![(1, 1), (2, 2), (3, 3)];
 
-    let (assignments, _) =
-        leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
+    let (assignments, _) = leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
 
     assert_eq!(assignments.len(), 3);
     // Self-loops are filtered out in adjacency, so this is like no edges.
     // Each node should be in its own cluster.
     let unique: HashSet<i64> = assignments.values().copied().collect();
-    assert_eq!(unique.len(), 3, "self-loops-only graph: each node in its own cluster");
+    assert_eq!(
+        unique.len(),
+        3,
+        "self-loops-only graph: each node in its own cluster"
+    );
 }
 
 // ===========================================================================
@@ -1994,14 +1988,20 @@ fn test_leiden_self_loops_only() {
 fn test_leiden_modularity_non_negative() {
     let nodes: Vec<i64> = (1..=10).collect();
     let edges = vec![
-        (1, 2), (2, 3), (1, 3),
-        (4, 5), (5, 6), (4, 6),
-        (7, 8), (8, 9), (7, 9),
-        (3, 4), (6, 7), // bridges
+        (1, 2),
+        (2, 3),
+        (1, 3),
+        (4, 5),
+        (5, 6),
+        (4, 6),
+        (7, 8),
+        (8, 9),
+        (7, 9),
+        (3, 4),
+        (6, 7), // bridges
     ];
 
-    let (_, modularity) =
-        leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
+    let (_, modularity) = leiden::leiden_raw(&nodes, &edges, &leiden::LeidenConfig::default());
 
     assert!(
         modularity >= 0.0,
@@ -2029,7 +2029,10 @@ fn test_wiki_single_file_cluster() {
     let (output, _) = wiki::render_wiki(&conn, &config).unwrap();
 
     assert!(output.contains("SingleFile"));
-    assert!(output.contains("main"), "wiki should mention the main function");
+    assert!(
+        output.contains("main"),
+        "wiki should mention the main function"
+    );
 }
 
 // ===========================================================================
@@ -2100,7 +2103,9 @@ fn test_fts_special_characters_no_panic() {
     write::sync_fts(&conn).unwrap();
 
     // These should all be safe due to sanitize_fts_query.
-    for query in &["OR", "AND", "NOT", "NEAR", "\"", "'", "()", "a OR b", "a*b", "near/2"] {
+    for query in &[
+        "OR", "AND", "NOT", "NEAR", "\"", "'", "()", "a OR b", "a*b", "near/2",
+    ] {
         let sanitized = read::sanitize_fts_query(query);
         let result = read::search_symbols_fts(&conn, &sanitized, 10);
         assert!(
@@ -2240,18 +2245,15 @@ fn test_pagerank_large_fan_in() {
     nodes.push(hub);
     let edges: Vec<(i64, i64)> = (1..100).map(|i| (i, hub)).collect();
 
-    let ranks = pagerank::pagerank_raw(
-        &nodes,
-        &edges,
-        &pagerank::PageRankConfig::default(),
-    );
+    let ranks = pagerank::pagerank_raw(&nodes, &edges, &pagerank::PageRankConfig::default());
 
     // Hub should have the highest rank.
     let hub_rank = ranks[&hub];
     for i in 1..100 {
         assert!(
             hub_rank > ranks[&i],
-            "hub should outrank node {i}: hub={hub_rank}, node={}", ranks[&i]
+            "hub should outrank node {i}: hub={hub_rank}, node={}",
+            ranks[&i]
         );
     }
 }
@@ -2275,7 +2277,11 @@ fn test_blast_radius_long_chain() {
     // f9 (end of chain) is depended on transitively by all 9 predecessors.
     let result = blast::blast_radius_for_file(&conn, ids[9]).unwrap();
     assert_eq!(result.transitive_count, 9);
-    assert_eq!(result.direct_importers.len(), 1, "only f8 imports f9 directly");
+    assert_eq!(
+        result.direct_importers.len(),
+        1,
+        "only f8 imports f9 directly"
+    );
 
     // f0 (start of chain) has no dependents.
     let result0 = blast::blast_radius_for_file(&conn, ids[0]).unwrap();
@@ -2399,10 +2405,12 @@ fn test_delete_and_reinsert_fresh_ids() {
     write::delete_file_data(&conn, f).unwrap();
 
     let f2 = insert_file(&conn, "a.rs");
-    let new_ids =
-        write::insert_symbols(&conn, f2, &[sym("new", "function", 1, 3, true)]).unwrap();
+    let new_ids = write::insert_symbols(&conn, f2, &[sym("new", "function", 1, 3, true)]).unwrap();
 
-    assert_ne!(old_ids[0], new_ids[0], "re-inserted symbol should get a new ID");
+    assert_ne!(
+        old_ids[0], new_ids[0],
+        "re-inserted symbol should get a new ID"
+    );
 }
 
 // ===========================================================================
@@ -2425,7 +2433,10 @@ fn test_reindex_unchanged_file_skipped() {
     index::full_index(&conn, dir.path(), false).unwrap();
     let count2 = read::get_symbol_count(&conn).unwrap();
 
-    assert_eq!(count1, count2, "re-indexing unchanged file should not duplicate symbols");
+    assert_eq!(
+        count1, count2,
+        "re-indexing unchanged file should not duplicate symbols"
+    );
 }
 
 // ===========================================================================
@@ -2450,8 +2461,14 @@ fn test_force_reindex() {
 
     let all = read::get_all_symbols(&conn).unwrap();
     let names: Vec<&str> = all.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"replaced"), "force reindex should pick up new symbol");
-    assert!(!names.contains(&"original"), "old symbol should be gone after force reindex");
+    assert!(
+        names.contains(&"replaced"),
+        "force reindex should pick up new symbol"
+    );
+    assert!(
+        !names.contains(&"original"),
+        "old symbol should be gone after force reindex"
+    );
 }
 
 // ===========================================================================
@@ -2608,14 +2625,17 @@ fn test_boundaries_suggest_from_clusters() {
     assert!(froms.contains("src/ui/**"));
     assert!(froms.contains("src/db/**"));
     for rule in &cfg.boundary {
-        assert!(!rule.deny.is_empty(), "each rule should deny the other cluster");
+        assert!(
+            !rule.deny.is_empty(),
+            "each rule should deny the other cluster"
+        );
     }
 }
 
 #[test]
 fn test_wiki_renders_violation_marker_when_config_passed() {
     use qartez_mcp::graph::boundaries::{check_boundaries, parse_config};
-    use qartez_mcp::graph::wiki::{render_wiki, WikiConfig};
+    use qartez_mcp::graph::wiki::{WikiConfig, render_wiki};
     use std::path::Path;
 
     let conn = setup();
@@ -2643,7 +2663,10 @@ deny = ["src/db/**"]
     let files = read::get_all_files(&conn).unwrap();
     let edges = read::get_all_edges(&conn).unwrap();
     let violations = check_boundaries(&config, &files, &edges);
-    assert!(!violations.is_empty(), "seed edge src/auth/login -> src/db/blob must violate");
+    assert!(
+        !violations.is_empty(),
+        "seed edge src/auth/login -> src/db/blob must violate"
+    );
 
     let wiki_cfg = WikiConfig {
         project_name: "test".to_string(),
@@ -2660,7 +2683,7 @@ deny = ["src/db/**"]
 
 #[test]
 fn test_wiki_no_marker_without_config() {
-    use qartez_mcp::graph::wiki::{render_wiki, WikiConfig};
+    use qartez_mcp::graph::wiki::{WikiConfig, render_wiki};
 
     let conn = setup();
     let f_a = write::upsert_file(&conn, "src/auth/login.rs", 1000, 100, "rust", 10).unwrap();
@@ -2709,8 +2732,14 @@ mod benchmark_tests {
         assert_eq!(scores.non_mcp_items, 0);
         assert_eq!(scores.intersection, 0);
         // Debatable: both empty returns "perfect" scores.
-        assert_eq!(scores.precision, 1.0, "empty mcp → precision=1.0 by convention");
-        assert_eq!(scores.recall, 1.0, "empty non-mcp → recall=1.0 by convention");
+        assert_eq!(
+            scores.precision, 1.0,
+            "empty mcp → precision=1.0 by convention"
+        );
+        assert_eq!(
+            scores.recall, 1.0,
+            "empty non-mcp → recall=1.0 by convention"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2720,8 +2749,7 @@ mod benchmark_tests {
     #[test]
     fn test_compare_mcp_only() {
         // Parser expects `+ name kind` or `- name kind` format.
-        let scores =
-            set_compare::compare("qartez_find", "+ foo function", "").unwrap();
+        let scores = set_compare::compare("qartez_find", "+ foo function", "").unwrap();
         assert!(scores.mcp_items > 0, "mcp should parse at least 1 item");
         assert_eq!(scores.non_mcp_items, 0);
         assert_eq!(scores.recall, 1.0, "empty reference → recall=1.0");
@@ -2734,10 +2762,12 @@ mod benchmark_tests {
 
     #[test]
     fn test_compare_non_mcp_only() {
-        let scores =
-            set_compare::compare("qartez_find", "", "+ bar struct").unwrap();
+        let scores = set_compare::compare("qartez_find", "", "+ bar struct").unwrap();
         assert_eq!(scores.mcp_items, 0);
-        assert!(scores.non_mcp_items > 0, "non-mcp should parse at least 1 item");
+        assert!(
+            scores.non_mcp_items > 0,
+            "non-mcp should parse at least 1 item"
+        );
         assert_eq!(scores.precision, 1.0, "empty mcp → precision=1.0");
         assert_eq!(scores.recall, 0.0, "no intersection → recall=0.0");
     }
@@ -2881,10 +2911,7 @@ mod benchmark_tests {
 
     #[test]
     fn test_krippendorff_zero_variance() {
-        let units = vec![
-            vec![Some(5.0), Some(5.0)],
-            vec![Some(5.0), Some(5.0)],
-        ];
+        let units = vec![vec![Some(5.0), Some(5.0)], vec![Some(5.0), Some(5.0)]];
         let alpha = judge::krippendorff_alpha_interval(&units);
         assert!(
             alpha.is_none(),

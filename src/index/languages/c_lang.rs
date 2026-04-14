@@ -25,7 +25,14 @@ impl LanguageSupport for CSupport {
         let mut imports = Vec::new();
         let mut references = Vec::new();
         let root = tree.root_node();
-        extract_from_node(root, source, None, &mut symbols, &mut imports, &mut references);
+        extract_from_node(
+            root,
+            source,
+            None,
+            &mut symbols,
+            &mut imports,
+            &mut references,
+        );
         ParseResult {
             symbols,
             imports,
@@ -58,14 +65,7 @@ fn extract_from_node(
                 let idx = symbols.len();
                 symbols.push(sym);
                 for child in children(node) {
-                    extract_from_node(
-                        child,
-                        source,
-                        Some(idx),
-                        symbols,
-                        imports,
-                        references,
-                    );
+                    extract_from_node(child, source, Some(idx), symbols, imports, references);
                 }
                 return;
             }
@@ -399,8 +399,18 @@ fn is_builtin_callable(name: &str) -> bool {
 fn is_builtin_type(name: &str) -> bool {
     matches!(
         name,
-        "int" | "long" | "short" | "char" | "float" | "double" | "void" | "unsigned" | "signed"
-            | "size_t" | "FILE" | "bool"
+        "int"
+            | "long"
+            | "short"
+            | "char"
+            | "float"
+            | "double"
+            | "void"
+            | "unsigned"
+            | "signed"
+            | "size_t"
+            | "FILE"
+            | "bool"
     )
 }
 

@@ -242,11 +242,7 @@ fn node_text(node: Node, source: &[u8]) -> String {
 }
 
 /// Extract `module` block `source` attributes as import edges.
-fn extract_module_sources(
-    node: Node,
-    source: &[u8],
-    imports: &mut Vec<ExtractedImport>,
-) {
+fn extract_module_sources(node: Node, source: &[u8], imports: &mut Vec<ExtractedImport>) {
     for child in children(node) {
         if child.kind() == "block" {
             let block_type = children(child)
@@ -263,13 +259,14 @@ fn extract_module_sources(
                                     .map(|n| node_text(n, source));
                                 if attr_name.as_deref() == Some("source")
                                     && let Some(val) = extract_attr_string_value(attr, source)
-                                        && (val.starts_with("./") || val.starts_with("../")) {
-                                            imports.push(ExtractedImport {
-                                                source: val,
-                                                specifiers: vec![],
-                                                is_reexport: false,
-                                            });
-                                        }
+                                    && (val.starts_with("./") || val.starts_with("../"))
+                                {
+                                    imports.push(ExtractedImport {
+                                        source: val,
+                                        specifiers: vec![],
+                                        is_reexport: false,
+                                    });
+                                }
                             }
                         }
                     }
@@ -365,9 +362,10 @@ fn extract_refs_from_text(
     // var.xxx -> references variable "xxx"
     for cap in VAR_REF.captures_iter(text) {
         let var_name = &cap[1];
-        if symbols.iter().any(|s| {
-            s.name == var_name && matches!(s.kind, SymbolKind::Variable)
-        }) {
+        if symbols
+            .iter()
+            .any(|s| s.name == var_name && matches!(s.kind, SymbolKind::Variable))
+        {
             references.push(ExtractedReference {
                 name: var_name.to_string(),
                 line,
@@ -380,9 +378,10 @@ fn extract_refs_from_text(
     // local.xxx -> references locals value "xxx"
     for cap in LOCAL_REF.captures_iter(text) {
         let local_name = &cap[1];
-        if symbols.iter().any(|s| {
-            s.name == local_name && matches!(s.kind, SymbolKind::Local)
-        }) {
+        if symbols
+            .iter()
+            .any(|s| s.name == local_name && matches!(s.kind, SymbolKind::Local))
+        {
             references.push(ExtractedReference {
                 name: local_name.to_string(),
                 line,
@@ -395,9 +394,10 @@ fn extract_refs_from_text(
     // module.xxx -> references module "xxx"
     for cap in MODULE_REF.captures_iter(text) {
         let mod_name = &cap[1];
-        if symbols.iter().any(|s| {
-            s.name == mod_name && matches!(s.kind, SymbolKind::Module)
-        }) {
+        if symbols
+            .iter()
+            .any(|s| s.name == mod_name && matches!(s.kind, SymbolKind::Module))
+        {
             references.push(ExtractedReference {
                 name: mod_name.to_string(),
                 line,
@@ -432,9 +432,10 @@ fn extract_refs_from_text(
             continue;
         }
         let resource_ref = format!("{type_name}.{res_name}");
-        if symbols.iter().any(|s| {
-            s.name == resource_ref && matches!(s.kind, SymbolKind::Resource)
-        }) {
+        if symbols
+            .iter()
+            .any(|s| s.name == resource_ref && matches!(s.kind, SymbolKind::Resource))
+        {
             references.push(ExtractedReference {
                 name: resource_ref,
                 line,
@@ -657,10 +658,7 @@ resource "aws_subnet" "sub" {
   vpc_id = aws_vpc.main.id
 }"#,
         );
-        assert!(result
-            .references
-            .iter()
-            .any(|r| r.name == "aws_vpc.main"));
+        assert!(result.references.iter().any(|r| r.name == "aws_vpc.main"));
     }
 
     #[test]
@@ -674,10 +672,12 @@ resource "aws_instance" "web" {
   ami = data.aws_ami.ubuntu.id
 }"#,
         );
-        assert!(result
-            .references
-            .iter()
-            .any(|r| r.name == "data.aws_ami.ubuntu"));
+        assert!(
+            result
+                .references
+                .iter()
+                .any(|r| r.name == "data.aws_ami.ubuntu")
+        );
     }
 
     #[test]

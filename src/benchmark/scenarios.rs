@@ -495,10 +495,7 @@ fn read_whole_file_steps(targets: &ResolvedTargets, _profile: &LanguageProfile) 
 fn outline_small_file_args(targets: &ResolvedTargets, _profile: &LanguageProfile) -> Value {
     json!({ "file_path": targets.impact_target_file })
 }
-fn outline_small_file_steps(
-    targets: &ResolvedTargets,
-    _profile: &LanguageProfile,
-) -> Vec<SimStep> {
+fn outline_small_file_steps(targets: &ResolvedTargets, _profile: &LanguageProfile) -> Vec<SimStep> {
     vec![SimStep::Read {
         path: targets.impact_target_file.clone(),
         range: None,
@@ -509,10 +506,7 @@ fn outline_small_file_steps(
 fn unused_with_limit_args(_targets: &ResolvedTargets, _profile: &LanguageProfile) -> Value {
     json!({ "limit": 5 })
 }
-fn unused_with_limit_steps(
-    _targets: &ResolvedTargets,
-    profile: &LanguageProfile,
-) -> Vec<SimStep> {
+fn unused_with_limit_steps(_targets: &ResolvedTargets, profile: &LanguageProfile) -> Vec<SimStep> {
     vec![SimStep::GrepContent {
         regex: r"^pub (fn|struct|enum|trait|const)".to_string(),
         ext_filter: ext_filter_of(profile),
@@ -523,10 +517,7 @@ fn unused_with_limit_steps(
 fn impact_nonexistent_args(_targets: &ResolvedTargets, _profile: &LanguageProfile) -> Value {
     json!({ "file_path": "src/this_file_does_not_exist.rs" })
 }
-fn impact_nonexistent_steps(
-    _targets: &ResolvedTargets,
-    profile: &LanguageProfile,
-) -> Vec<SimStep> {
+fn impact_nonexistent_steps(_targets: &ResolvedTargets, profile: &LanguageProfile) -> Vec<SimStep> {
     vec![SimStep::GrepFiles {
         regex: "this_file_does_not_exist".to_string(),
         ext_filter: ext_filter_of(profile),
@@ -985,7 +976,11 @@ mod tests {
 
     #[test]
     fn tier_2_scenarios_have_unique_ids() {
-        let tier2_ids: Vec<&str> = SCENARIOS.iter().filter(|s| s.tier == 2).map(|s| s.id).collect();
+        let tier2_ids: Vec<&str> = SCENARIOS
+            .iter()
+            .filter(|s| s.tier == 2)
+            .map(|s| s.id)
+            .collect();
         let unique: std::collections::BTreeSet<&str> = tier2_ids.iter().copied().collect();
         assert_eq!(tier2_ids.len(), unique.len());
     }

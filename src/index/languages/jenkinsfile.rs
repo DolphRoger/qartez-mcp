@@ -70,9 +70,10 @@ fn extract_from_node(
             // Check for bare assignment expressions (BRANCH_NAME = "main")
             for child in children(node) {
                 if child.kind() == "assignment_expression"
-                    && let Some(sym) = extract_assignment(child, source) {
-                        symbols.push(sym);
-                    }
+                    && let Some(sym) = extract_assignment(child, source)
+                {
+                    symbols.push(sym);
+                }
             }
         }
         "import_declaration" => {
@@ -155,8 +156,8 @@ fn extract_dsl_block(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbo
             });
         }
         "stage" => {
-            let name = extract_first_string_arg(node, source)
-                .unwrap_or_else(|| "unnamed".to_string());
+            let name =
+                extract_first_string_arg(node, source).unwrap_or_else(|| "unnamed".to_string());
             symbols.push(ExtractedSymbol {
                 name,
                 kind: SymbolKind::Stage,
@@ -170,8 +171,8 @@ fn extract_dsl_block(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbo
             });
         }
         "node" => {
-            let label = extract_first_string_arg(node, source)
-                .unwrap_or_else(|| "default".to_string());
+            let label =
+                extract_first_string_arg(node, source).unwrap_or_else(|| "default".to_string());
             symbols.push(ExtractedSymbol {
                 name: format!("node:{label}"),
                 kind: SymbolKind::Job,
@@ -216,22 +217,23 @@ fn extract_local_variable(node: Node, source: &[u8], symbols: &mut Vec<Extracted
 
     for child in children(node) {
         if child.kind() == "variable_declarator"
-            && let Some(name_node) = children(child).find(|n| n.kind() == "identifier") {
-                let name = node_text(name_node, source);
-                if !name.is_empty() {
-                    symbols.push(ExtractedSymbol {
-                        name,
-                        kind: SymbolKind::Variable,
-                        line_start: node.start_position().row as u32 + 1,
-                        line_end: node.end_position().row as u32 + 1,
-                        signature: extract_signature(node, source),
-                        is_exported: false,
-                        parent_idx: None,
-                        unused_excluded: false,
-                        complexity: None,
-                    });
-                }
+            && let Some(name_node) = children(child).find(|n| n.kind() == "identifier")
+        {
+            let name = node_text(name_node, source);
+            if !name.is_empty() {
+                symbols.push(ExtractedSymbol {
+                    name,
+                    kind: SymbolKind::Variable,
+                    line_start: node.start_position().row as u32 + 1,
+                    line_end: node.end_position().row as u32 + 1,
+                    signature: extract_signature(node, source),
+                    is_exported: false,
+                    parent_idx: None,
+                    unused_excluded: false,
+                    complexity: None,
+                });
             }
+        }
     }
 }
 

@@ -12,15 +12,13 @@ pub struct DockerfileSupport;
 
 // No compatible tree-sitter-dockerfile crate for tree-sitter 0.24+.
 // Dockerfile syntax is line-oriented, so regex works well here.
-static FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^FROM\s+(\S+)(?:\s+[Aa][Ss]\s+(\S+))?").unwrap()
-});
+static FROM_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^FROM\s+(\S+)(?:\s+[Aa][Ss]\s+(\S+))?").unwrap());
 static ARG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^ARG\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap());
 static ENV_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^ENV\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap());
-static EXPOSE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^EXPOSE\s+(.+)$").unwrap());
+static EXPOSE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^EXPOSE\s+(.+)$").unwrap());
 static ENTRYPOINT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(ENTRYPOINT|CMD)\s+(.+)$").unwrap());
 static COPY_FROM_RE: LazyLock<Regex> =

@@ -30,13 +30,7 @@ impl LanguageSupport for YamlSupport {
             if let Some(doc) = root.child(i)
                 && doc.kind() == "document"
             {
-                extract_document(
-                    doc,
-                    source,
-                    &mut symbols,
-                    &mut imports,
-                    &mut references,
-                );
+                extract_document(doc, source, &mut symbols, &mut imports, &mut references);
             }
         }
 
@@ -164,9 +158,9 @@ fn extract_github_actions(
                         unused_excluded: false,
                         complexity: None,
                     });
-                } else if let Some(trigger_mapping) =
-                    pair.child_by_field_name("value")
-                        .and_then(find_block_mapping_recursive)
+                } else if let Some(trigger_mapping) = pair
+                    .child_by_field_name("value")
+                    .and_then(find_block_mapping_recursive)
                 {
                     for trigger_pair in iter_mapping_pairs(trigger_mapping) {
                         if let Some(trigger) = pair_key_text(trigger_pair, source) {
@@ -223,11 +217,7 @@ fn extract_github_actions(
     }
 }
 
-fn extract_needs_refs(
-    job_mapping: Node,
-    source: &[u8],
-    references: &mut Vec<ExtractedReference>,
-) {
+fn extract_needs_refs(job_mapping: Node, source: &[u8], references: &mut Vec<ExtractedReference>) {
     for pair in iter_mapping_pairs(job_mapping) {
         if let Some(key) = pair_key_text(pair, source)
             && key == "needs"
@@ -253,11 +243,7 @@ fn extract_needs_refs(
     }
 }
 
-fn extract_uses_actions(
-    job_mapping: Node,
-    source: &[u8],
-    symbols: &mut Vec<ExtractedSymbol>,
-) {
+fn extract_uses_actions(job_mapping: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbol>) {
     if let Some(steps_node) = find_value_node(job_mapping, "steps", source) {
         collect_key_values_recursive(steps_node, "uses", source, symbols);
     }
@@ -337,10 +323,10 @@ fn extract_gitlab_ci(
             {
                 if key.starts_with('.')
                     && !has_key(job_mapping, "script", source)
-                        && !has_key(job_mapping, "extends", source)
-                    {
-                        continue;
-                    }
+                    && !has_key(job_mapping, "extends", source)
+                {
+                    continue;
+                }
 
                 symbols.push(ExtractedSymbol {
                     name: key.clone(),
@@ -384,9 +370,10 @@ fn has_gitlab_job_pattern(mapping: Node, source: &[u8]) -> bool {
         if let Some(job_mapping) = pair
             .child_by_field_name("value")
             .and_then(find_block_mapping_recursive)
-            && (has_key(job_mapping, "script", source) || has_key(job_mapping, "extends", source)) {
-                return true;
-            }
+            && (has_key(job_mapping, "script", source) || has_key(job_mapping, "extends", source))
+        {
+            return true;
+        }
     }
     false
 }
@@ -430,28 +417,29 @@ fn extract_docker_compose(
                 if let Some(svc_mapping) = pair
                     .child_by_field_name("value")
                     .and_then(find_block_mapping_recursive)
-                    && let Some(deps_node) = find_value_node(svc_mapping, "depends_on", source) {
-                        collect_sequence_values(deps_node, source, |dep, line| {
-                            references.push(ExtractedReference {
-                                name: dep,
-                                line,
-                                from_symbol_idx: None,
-                                kind: ReferenceKind::Use,
-                            });
+                    && let Some(deps_node) = find_value_node(svc_mapping, "depends_on", source)
+                {
+                    collect_sequence_values(deps_node, source, |dep, line| {
+                        references.push(ExtractedReference {
+                            name: dep,
+                            line,
+                            from_symbol_idx: None,
+                            kind: ReferenceKind::Use,
                         });
-                        if let Some(deps_mapping) = find_block_mapping_recursive(deps_node) {
-                            for dep_pair in iter_mapping_pairs(deps_mapping) {
-                                if let Some(dep_name) = pair_key_text(dep_pair, source) {
-                                    references.push(ExtractedReference {
-                                        name: dep_name,
-                                        line: dep_pair.start_position().row as u32 + 1,
-                                        from_symbol_idx: None,
-                                        kind: ReferenceKind::Use,
-                                    });
-                                }
+                    });
+                    if let Some(deps_mapping) = find_block_mapping_recursive(deps_node) {
+                        for dep_pair in iter_mapping_pairs(deps_mapping) {
+                            if let Some(dep_name) = pair_key_text(dep_pair, source) {
+                                references.push(ExtractedReference {
+                                    name: dep_name,
+                                    line: dep_pair.start_position().row as u32 + 1,
+                                    from_symbol_idx: None,
+                                    kind: ReferenceKind::Use,
+                                });
                             }
                         }
                     }
+                }
             }
         }
     }
@@ -502,9 +490,9 @@ fn has_compose_pattern(mapping: Node, source: &[u8]) -> bool {
                 && (has_key(svc_mapping, "image", source)
                     || has_key(svc_mapping, "build", source)
                     || has_key(svc_mapping, "container_name", source))
-                {
-                    return true;
-                }
+            {
+                return true;
+            }
         }
     }
     false
@@ -514,12 +502,7 @@ fn has_compose_pattern(mapping: Node, source: &[u8]) -> bool {
 // Ansible
 // ---------------------------------------------------------------------------
 
-fn extract_ansible(
-    mapping: Node,
-    doc: Node,
-    source: &[u8],
-    symbols: &mut Vec<ExtractedSymbol>,
-) {
+fn extract_ansible(mapping: Node, doc: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbol>) {
     if let Some(play_name) = find_scalar_value_in_mapping(mapping, "name", source) {
         symbols.push(ExtractedSymbol {
             name: play_name,
@@ -562,19 +545,20 @@ fn extract_ansible(
 fn extract_ansible_tasks(node: Node, source: &[u8], symbols: &mut Vec<ExtractedSymbol>) {
     for child in iter_sequence_items(node) {
         if let Some(task_mapping) = find_block_mapping_recursive(child)
-            && let Some(task_name) = find_scalar_value_in_mapping(task_mapping, "name", source) {
-                symbols.push(ExtractedSymbol {
-                    name: task_name,
-                    kind: SymbolKind::Task,
-                    line_start: child.start_position().row as u32 + 1,
-                    line_end: child.end_position().row as u32 + 1,
-                    signature: None,
-                    is_exported: false,
-                    parent_idx: None,
-                    unused_excluded: false,
-                    complexity: None,
-                });
-            }
+            && let Some(task_name) = find_scalar_value_in_mapping(task_mapping, "name", source)
+        {
+            symbols.push(ExtractedSymbol {
+                name: task_name,
+                kind: SymbolKind::Task,
+                line_start: child.start_position().row as u32 + 1,
+                line_end: child.end_position().row as u32 + 1,
+                signature: None,
+                is_exported: false,
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+            });
+        }
     }
 }
 
@@ -792,9 +776,10 @@ fn collect_sequence_items<'a>(node: Node<'a>, items: &mut Vec<Node<'a>>) {
         "block_sequence" => {
             for i in 0..node.child_count() as u32 {
                 if let Some(child) = node.child(i)
-                    && child.kind() == "block_sequence_item" {
-                        items.push(child);
-                    }
+                    && child.kind() == "block_sequence_item"
+                {
+                    items.push(child);
+                }
             }
         }
         "flow_sequence" => {
@@ -834,9 +819,10 @@ fn scalar_text_recursive(node: Node, source: &[u8]) -> Option<String> {
     }
     for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i)
-            && let Some(text) = scalar_text_recursive(child, source) {
-                return Some(text);
-            }
+            && let Some(text) = scalar_text_recursive(child, source)
+        {
+            return Some(text);
+        }
     }
     None
 }
@@ -1206,10 +1192,7 @@ unit_test:
         assert!(names.contains(&".test_template"));
         assert!(names.contains(&"unit_test"));
 
-        assert!(result
-            .references
-            .iter()
-            .any(|r| r.name == ".test_template"));
+        assert!(result.references.iter().any(|r| r.name == ".test_template"));
     }
 
     #[test]

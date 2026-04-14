@@ -27,10 +27,7 @@ fn make_server() -> (QartezServer, TempDir) {
     let dir = TempDir::new().unwrap();
     let conn = Connection::open_in_memory().unwrap();
     schema::create_schema(&conn).unwrap();
-    (
-        QartezServer::new(conn, dir.path().to_path_buf(), 300),
-        dir,
-    )
+    (QartezServer::new(conn, dir.path().to_path_buf(), 300), dir)
 }
 
 /// Assert the single user-role text payload of a `GetPromptResult`.
@@ -73,9 +70,8 @@ fn qartez_review_prompt_cites_core_tools_and_target() {
 fn qartez_architecture_prompt_defaults_top_n_and_cites_core_tools() {
     let (server, _dir) = make_server();
 
-    let default_result = server.qartez_architecture_prompt(Parameters(SoulArchitectureArgs {
-        top_n: None,
-    }));
+    let default_result =
+        server.qartez_architecture_prompt(Parameters(SoulArchitectureArgs { top_n: None }));
     let default_text = user_text(&default_result);
     assert!(default_text.contains("qartez_map"));
     assert!(default_text.contains("top_n=15"));
@@ -166,11 +162,7 @@ fn qartez_pre_merge_prompt_handles_empty_file_list() {
 #[test]
 fn prompt_router_registers_all_five_canned_prompts() {
     let router = QartezServer::prompt_router();
-    let names: Vec<String> = router
-        .list_all()
-        .into_iter()
-        .map(|p| p.name)
-        .collect();
+    let names: Vec<String> = router.list_all().into_iter().map(|p| p.name).collect();
 
     for expected in [
         "qartez_review",

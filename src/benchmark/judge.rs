@@ -334,11 +334,7 @@ pub fn build_prompt(
 /// rejects any axis score outside [`AXIS_ANCHORS`] — that is a schema
 /// violation the model should never emit under `--json-schema` and we
 /// surface it as an error rather than silently clamping.
-pub fn parse_judge_response(
-    raw: &str,
-    position: Position,
-    run_index: u8,
-) -> Result<PerRunScores> {
+pub fn parse_judge_response(raw: &str, position: Position, run_index: u8) -> Result<PerRunScores> {
     let clean = strip_fence(raw);
 
     #[derive(Deserialize)]
@@ -839,7 +835,8 @@ pub fn score_scenario(
     if raw_bodies.len() >= 2 && raw_bodies.iter().all(|b| b == &raw_bodies[0]) {
         tracing::warn!(
             "SC collapse on scenario `{}` — all {} runs identical",
-            scenario.scenario_id, total_runs
+            scenario.scenario_id,
+            total_runs
         );
     }
 
@@ -1688,10 +1685,7 @@ pub fn compute_programmatic_axes(
     };
 
     // Completeness: derived from set_comparison recall.
-    let recall = scenario
-        .set_comparison
-        .as_ref()
-        .map(|sc| sc.recall);
+    let recall = scenario.set_comparison.as_ref().map(|sc| sc.recall);
     let completeness_score = match recall {
         Some(r) if r >= 0.95 => 10,
         Some(r) if r >= 0.8 => 7,
@@ -1781,7 +1775,10 @@ pub fn build_batch_prompt(scenarios: &[&ScenarioReport]) -> String {
 
 /// Raw per-scenario entry from the batch judge response.
 #[derive(Debug, serde::Deserialize)]
-#[expect(dead_code, reason = "id is part of the JSON schema contract for traceability")]
+#[expect(
+    dead_code,
+    reason = "id is part of the JSON schema contract for traceability"
+)]
 struct BatchScoreEntry {
     id: String,
     mcp: BatchSideEntry,
@@ -1826,10 +1823,8 @@ fn run_batch_judge_subprocess(prompt: &str, model: &str) -> Result<String> {
         let mut child = match spawn {
             Ok(c) => c,
             Err(e) => {
-                last_error = Some(
-                    anyhow::Error::new(e)
-                        .context("spawn `claude -p` for batch judge"),
-                );
+                last_error =
+                    Some(anyhow::Error::new(e).context("spawn `claude -p` for batch judge"));
                 if attempt + 1 < RETRY_ATTEMPTS {
                     std::thread::sleep(std::time::Duration::from_millis(
                         RETRY_BACKOFF_MS[attempt as usize],
@@ -1897,10 +1892,7 @@ fn run_batch_judge_subprocess(prompt: &str, model: &str) -> Result<String> {
 /// LLM-scored axes (correctness, usability) with 3 programmatic
 /// axes (conciseness, completeness, groundedness) into full
 /// [`QualityScores`].
-pub fn score_batch(
-    scenarios: &[&ScenarioReport],
-    model: &str,
-) -> Result<Vec<QualityScores>> {
+pub fn score_batch(scenarios: &[&ScenarioReport], model: &str) -> Result<Vec<QualityScores>> {
     if scenarios.is_empty() {
         return Ok(Vec::new());
     }
@@ -2686,10 +2678,7 @@ mod tests {
         let prior = make_report(Some("aaaa"), vec![scenario]);
 
         let cache = build_judge_cache(&prior, Some("bbbb"), false);
-        assert!(
-            cache.is_empty(),
-            "mismatched SHA must invalidate the cache"
-        );
+        assert!(cache.is_empty(), "mismatched SHA must invalidate the cache");
     }
 
     #[test]
@@ -2837,10 +2826,7 @@ mod tests {
         let mut drifted = make_scenario("mcp drifted", "non-mcp drifted");
         drifted.scenario_id = "scn".to_string();
         let hit = lookup_judge_cache(&cache, &drifted, true);
-        assert!(
-            hit.is_some(),
-            "allow_stale must reuse by scenario_id alone"
-        );
+        assert!(hit.is_some(), "allow_stale must reuse by scenario_id alone");
     }
 
     #[test]

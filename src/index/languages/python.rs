@@ -220,7 +220,9 @@ fn count_complexity(node: Node) -> u32 {
         "except_clause" => 1,
         "boolean_operator" => 1,
         "conditional_expression" => 1,
-        "list_comprehension" | "set_comprehension" | "dictionary_comprehension"
+        "list_comprehension"
+        | "set_comprehension"
+        | "dictionary_comprehension"
         | "generator_expression" => 1,
         // Nested lambdas are separate scopes; do not count their branching
         // as part of the enclosing function.
@@ -736,8 +738,10 @@ class _InternalHelper:
             .position(|s| s.name == "run" && matches!(s.kind, SymbolKind::Method))
             .expect("run method");
         assert!(
-            result.references.iter().any(|r| r.name == "helper"
-                && r.from_symbol_idx == Some(run_idx)),
+            result
+                .references
+                .iter()
+                .any(|r| r.name == "helper" && r.from_symbol_idx == Some(run_idx)),
             "helper() inside run should be attributed to run method, got {:?}",
             result.references
         );
@@ -757,17 +761,18 @@ class _InternalHelper:
 
     #[test]
     fn test_refs_decorated_function_body() {
-        let result = parse_python(
-            "def helper():\n    pass\n\n@decorator\ndef wrapped():\n    helper()\n",
-        );
+        let result =
+            parse_python("def helper():\n    pass\n\n@decorator\ndef wrapped():\n    helper()\n");
         let wrapped_idx = result
             .symbols
             .iter()
             .position(|s| s.name == "wrapped")
             .expect("wrapped symbol");
         assert!(
-            result.references.iter().any(|r| r.name == "helper"
-                && r.from_symbol_idx == Some(wrapped_idx)),
+            result
+                .references
+                .iter()
+                .any(|r| r.name == "helper" && r.from_symbol_idx == Some(wrapped_idx)),
             "helper() inside @-decorated wrapped should attribute to wrapped"
         );
     }
