@@ -88,6 +88,9 @@ if [ -z "$SCRIPT_DIR" ] || [ ! -f "${SCRIPT_DIR}/Cargo.toml" ]; then
 fi
 
 # --- Rust ---
+# Must match `rust-version` in Cargo.toml. Edition 2024 needs >= 1.85.
+RUST_MIN="1.85.0"
+
 if command -v cargo >/dev/null 2>&1; then
     CARGO="$(command -v cargo)"
 elif [ -x "${HOME}/.cargo/bin/cargo" ]; then
@@ -106,6 +109,43 @@ else
         exit 1
     fi
     ok "Rust installed."
+fi
+
+# Version check: catch old rustc before cargo emits cryptic feature-gate errors.
+# `rustc --version` output: "rustc 1.85.0 (abc 2025-02-20)"
+RUSTC_BIN="$(dirname "$CARGO")/rustc"
+[ -x "$RUSTC_BIN" ] || RUSTC_BIN="rustc"
+if command -v "$RUSTC_BIN" >/dev/null 2>&1; then
+    RUSTC_VER="$("$RUSTC_BIN" --version 2>/dev/null | awk '{print $2}' | cut -d- -f1)"
+else
+    RUSTC_VER=""
+fi
+
+if [ -n "$RUSTC_VER" ]; then
+    OLDEST="$(printf '%s\n%s\n' "$RUST_MIN" "$RUSTC_VER" | sort -V | head -n 1)"
+    if [ "$OLDEST" != "$RUST_MIN" ]; then
+        warn "Rust ${RUSTC_VER} is older than the required ${RUST_MIN}."
+        if command -v rustup >/dev/null 2>&1; then
+            info "Updating Rust toolchain via rustup..."
+            rustup update stable
+            rustup default stable >/dev/null 2>&1 || true
+            RUSTC_VER_NEW="$("$RUSTC_BIN" --version 2>/dev/null | awk '{print $2}' | cut -d- -f1)"
+            OLDEST_NEW="$(printf '%s\n%s\n' "$RUST_MIN" "$RUSTC_VER_NEW" | sort -V | head -n 1)"
+            if [ "$OLDEST_NEW" != "$RUST_MIN" ]; then
+                err "Rust is still ${RUSTC_VER_NEW} after update. Minimum required: ${RUST_MIN}."
+                err "Your stable channel may be pinned. Try: rustup default stable && rustup update"
+                exit 1
+            fi
+            ok "Rust updated to ${RUSTC_VER_NEW}."
+        else
+            err "Rust ${RUSTC_VER} is too old. qartez-mcp requires >= ${RUST_MIN}."
+            err "Your rustc was not installed via rustup, so we cannot auto-update it."
+            err "Options:"
+            err "  1. Install rustup and retry:  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+            err "  2. Upgrade Rust via your OS package manager to >= ${RUST_MIN}"
+            exit 1
+        fi
+    fi
 fi
 
 # --- Build ---

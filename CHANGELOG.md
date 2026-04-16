@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1] - 2026-04-16
+
+### Fixed
+
+- **Installer auto-upgrades old Rust toolchains** - `install.sh` now reads `rust-version = "1.85"` from `Cargo.toml`, compares against `rustc --version`, and runs `rustup update stable` when the local toolchain is too old. Users without rustup receive a clear upgrade message instead of cryptic feature-gate errors.
+- **Setup builds on stable Rust** - replaced the nightly-only `File::try_lock` with the `fs4` crate in `qartez-setup`, so the update-check lock works on stable toolchains.
+
 ## [0.5.0] - 2026-04-16
 
 ### Added

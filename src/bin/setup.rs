@@ -2585,6 +2585,7 @@ fn update_cache_is_fresh() -> bool {
 // returned file handle must be kept alive for the duration of the
 // critical section - dropping it releases the lock.
 fn acquire_update_lock() -> Option<fs::File> {
+    use fs4::fs_std::FileExt;
     let path = home_dir().join(".qartez").join("update.lock");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -2595,9 +2596,9 @@ fn acquire_update_lock() -> Option<fs::File> {
         .truncate(false)
         .open(&path)
         .ok()?;
-    match file.try_lock() {
-        Ok(()) => Some(file),
-        Err(_) => None,
+    match file.try_lock_exclusive() {
+        Ok(true) => Some(file),
+        Ok(false) | Err(_) => None,
     }
 }
 
