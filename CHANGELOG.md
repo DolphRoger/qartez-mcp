@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.1] - 2026-04-17
+
+### Added
+
+- **CodeQL SAST workflow** - weekly CodeQL analysis for Rust and GitHub Actions with `security-and-quality` query pack; SHA-pinned actions, read-only default permissions.
+- **cargo-fuzz harness** - `qartez-mcp-fuzz` crate with two fuzz targets (`parse_boundary_config`, `parse_security_config`) plus a weekly `fuzz.yml` workflow that uploads crash artifacts on failure.
+- **`osv-scanner.toml` allowlist** - documents the transitive `paste` RUSTSEC-2024-0436 "unmaintained" notice as non-exploitable (compile-time-only proc-macro via optional `tokenizers`).
+
+### Changed
+
+- **notify 7 -> 8, tokenizers 0.21 -> 0.22** - routine dependency upgrades; full test suite passes unchanged.
+
+### Fixed
+
+- **`install.sh` SC2015 anti-pattern** - replaced `cd ... && pwd || true` with an explicit `|| SCRIPT_DIR=""` fallback so a failing `pwd` can no longer mask a failing `cd`.
+
 ## [0.7.0] - 2026-04-17
 
 ### Added

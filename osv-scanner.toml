@@ -1,0 +1,9 @@
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+# `paste` is a compile-time-only proc-macro pulled in transitively via
+# `tokenizers` (behind our optional `semantic` feature) and its
+# `macro_rules_attribute` dependency. The advisory is an "unmaintained"
+# notice, not an exploitable vulnerability: paste has no runtime code path
+# and does not process untrusted input. The fix must come from upstream
+# tokenizers dropping the dependency; until then this does not affect users.
+reason = "Transitive compile-time proc-macro via tokenizers; unmaintained notice only, no runtime impact. Awaiting upstream tokenizers fix."

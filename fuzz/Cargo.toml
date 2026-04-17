@@ -1,0 +1,29 @@
+[package]
+name = "qartez-mcp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+qartez-mcp = { path = ".." }
+toml_edit = { version = "0.22", features = ["serde"] }
+
+[[bin]]
+name = "parse_boundary_config"
+path = "fuzz_targets/parse_boundary_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_security_config"
+path = "fuzz_targets/parse_security_config.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

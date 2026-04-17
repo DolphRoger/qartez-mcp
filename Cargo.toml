@@ -1,6 +1,6 @@
 [package]
 name = "qartez-mcp"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 rust-version = "1.88"
 description = "MCP server for codebase intelligence — tree-sitter indexing, PageRank, blast radius"
@@ -45,7 +45,7 @@ git2 = "0.20.4"
 glob = { version = "0.3", optional = true }
 globset = "0.4"
 ignore = "0.4.25"
-notify = "7"
+notify = "8"
 regex = "1.11"
 rmcp = { version = "1.4.0", features = ["server", "transport-async-rw"] }
 rusqlite = { version = "0.39.0", features = ["bundled-full"] }
@@ -93,7 +93,7 @@ tree-sitter-ocaml = "0.24.2"
 tree-sitter-r = "1.2.0"
 
 ort = { version = "2.0.0-rc.12", optional = true }
-tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["onig"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

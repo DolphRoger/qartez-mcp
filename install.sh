@@ -17,7 +17,7 @@ set -e
 QARTEZ_REPO="kuberstar/qartez-mcp"
 QARTEZ_BRANCH="main"
 INSTALL_DIR="${HOME}/.local/bin"
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 
 if [ -t 1 ]; then
     GREEN='\033[0;32m'; BLUE='\033[1;34m'; RED='\033[1;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
