@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.3] - 2026-04-18
+
+### Added
+
+- **Linux musl prebuilt binaries** - `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` archives are back in the release matrix, so Alpine and other musl-based distros install in under 10 seconds instead of falling through to the cargo build path.
+
+### Changed
+
+- **`git2` compiled without default features** - only local repository operations are used (Repository, BlameOptions, RevWalk, Signature), so the `ssh` and `https` transport features are now disabled. This removes `libssh2-sys` and `openssl-sys` from the dependency tree and unblocks musl cross-compilation on GitHub Actions runners that do not ship OpenSSL.
+
+### Fixed
+
+- **Node.js 20 deprecation warning in release workflow** - upgraded `softprops/action-gh-release` from v2.6.2 to v3.0.0, which runs on the Node 24 Actions runtime. GitHub is forcing Node 24 as the default on 2026-06-02.
+
 ## [0.7.2] - 2026-04-17
 
 ### Added
