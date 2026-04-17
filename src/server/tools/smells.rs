@@ -55,11 +55,13 @@ impl QartezServer {
 
         let all_symbols = if let Some(ref fp) = params.file_path {
             let resolved = self.safe_resolve(fp).map_err(|e| e.to_string())?;
-            let rel = resolved
-                .strip_prefix(&self.project_root)
-                .unwrap_or(&resolved)
-                .to_string_lossy()
-                .to_string();
+            let rel = crate::index::to_forward_slash(
+                resolved
+                    .strip_prefix(&self.project_root)
+                    .unwrap_or(&resolved)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
             let file = read::get_file_by_path(&conn, &rel)
                 .map_err(|e| format!("DB error: {e}"))?
                 .ok_or_else(|| format!("File not found: {fp}"))?;

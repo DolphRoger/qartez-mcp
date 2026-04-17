@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0] - 2026-04-17
+
+### Added
+
+- **Native Windows support** - PowerShell installer (`install.ps1`), automated installer test (`test-install.ps1`), and end-to-end build/install flow that does not require WSL or Git Bash. Quickstart documents the `iwr | iex` one-liner.
+- **Binary-invoked hooks** - `qartez-guard` handles Glob/Grep denials directly and `qartez-setup --session-start` replaces the shell session-start wrapper, eliminating bash as a runtime dependency on Windows.
+- **Cross-platform home detection** - `HOME` / `USERPROFILE` / `HOMEDRIVE`+`HOMEPATH` fallbacks land in `qartez-mcp`, `qartez-setup`, and the config loader so user-scoped paths resolve everywhere.
+- **Qartez skill expansion** - 9 new reference docs shipped with the Claude skill (`runtime-contract`, `subagent-contract`, `host-matrix`, `confidence-model`, and 5 doctrine guides: explore, debug, review, refactor, premerge) giving the skill full host parity and guard contract coverage.
+- **Documentation suite** - new `docs/architecture.md`, `docs/tools.md`, `docs/configuration.md`, and `docs/agent-guide.md` covering project layout, every tool, configuration, and agent integration.
+
+### Changed
+
+- **`binary_available` rewritten in pure Rust** - replaced the `which` shell-out with `PATH` splitting plus Windows `.exe`/`.cmd`/`.bat`/`.com` extension probing, removing a Unix-only dependency.
+- **Auto-update is Unix-only** - on Windows the updater prints a manual download link instead of running the `curl | sh` installer path.
+
+### Fixed
+
+- **Windows index keys always forward-slash** - normalized every boundary that writes or resolves index paths (ingest/reingest/delete, TS/JS/Rust/Python/Go/Dart resolvers, walker), resolving 26 Windows-only test failures observed in v0.6.0 CI.
+- **MCP tool path input accepts either separator on Windows** - `get_file_by_path` and the file-path filters in `qartez_knowledge`, `qartez_read`, `qartez_security`, `qartez_smells`, and `qartez_test_gaps` now normalize user input so `src\foo.rs` matches the forward-slash DB key without a confusing "File not found".
+- **Guard tolerates Windows canonicalization variants** - the hot-file guard now probes `/`, `\`, and `./` prefix variants before fail-open, so the Edit/Write deny decision matches the indexed path on Windows.
+
 ## [0.6.0] - 2026-04-17
 
 ### Changed

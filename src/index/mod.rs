@@ -83,8 +83,8 @@ pub fn full_index_multi(conn: &Connection, roots: &[PathBuf], force: bool) -> Re
         let prefix = root_prefix(root);
         for file_path in walker::walk_source_files(root) {
             let raw_rel = match file_path.strip_prefix(root) {
-                Ok(p) => p.to_string_lossy().to_string(),
-                Err(_) => file_path.to_string_lossy().to_string(),
+                Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
+                Err(_) => to_forward_slash(file_path.to_string_lossy().into_owned()),
             };
             all_known.insert(format!("{prefix}/{raw_rel}"));
             all_known.insert(raw_rel);
@@ -104,6 +104,39 @@ fn root_prefix(root: &Path) -> String {
     root.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "root".to_string())
+}
+
+/// Raw replacement: rewrites every `\` to `/` unconditionally.
+///
+/// Split out from [`to_forward_slash`] so the replacement logic can be
+/// unit-tested on every platform without the `MAIN_SEPARATOR` guard masking
+/// behavior on Unix. Do not call directly from production code - go through
+/// [`to_forward_slash`] so Unix semantics are preserved.
+#[inline]
+pub(crate) fn replace_backslashes_with_slashes(s: String) -> String {
+    if s.contains('\\') {
+        s.replace('\\', "/")
+    } else {
+        s
+    }
+}
+
+/// Normalize an OS path string so index keys are identical on Unix and Windows.
+///
+/// Index keys (strings stored in the `files` table and held in
+/// `known_paths` / `known_files`) are always forward-slash separated. On
+/// Windows `Path::to_string_lossy` and `Path::display` yield `\`-separated
+/// strings, which would fail lookups against keys written elsewhere. Guarding
+/// on [`std::path::MAIN_SEPARATOR`] keeps this a no-op on Unix, where `\` is
+/// a legal filename character that must not be rewritten.
+#[inline]
+pub(crate) fn to_forward_slash(s: impl Into<String>) -> String {
+    let s = s.into();
+    if std::path::MAIN_SEPARATOR == '/' {
+        s
+    } else {
+        replace_backslashes_with_slashes(s)
+    }
 }
 
 /// How an existing DB row for the same path should be reconciled before the
@@ -281,8 +314,8 @@ fn try_ingest_file(
     known_paths: &mut HashSet<String>,
 ) -> Result<FileIngestOutcome> {
     let raw_rel = match file_path.strip_prefix(root) {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => file_path.to_string_lossy().to_string(),
+        Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
+        Err(_) => to_forward_slash(file_path.to_string_lossy().into_owned()),
     };
     let rel_path = if path_prefix.is_empty() {
         raw_rel.clone()
@@ -854,7 +887,7 @@ fn resolve_import(
         for ext in [".ts", ".tsx", ".d.ts"] {
             let candidate = format!("{base}{ext}");
             if let Ok(rel) = Path::new(&candidate).strip_prefix(root) {
-                let rel = rel.to_string_lossy().to_string();
+                let rel = to_forward_slash(rel.to_string_lossy().into_owned());
                 if known_files.contains(&rel) {
                     return Some(rel);
                 }
@@ -866,7 +899,7 @@ fn resolve_import(
         for ext in [".tsx", ".ts", ".jsx"] {
             let candidate = format!("{base}{ext}");
             if let Ok(rel) = Path::new(&candidate).strip_prefix(root) {
-                let rel = rel.to_string_lossy().to_string();
+                let rel = to_forward_slash(rel.to_string_lossy().into_owned());
                 if known_files.contains(&rel) {
                     return Some(rel);
                 }
@@ -881,7 +914,7 @@ fn resolve_import(
         let candidate = format!("{}{ext}", resolved.to_string_lossy());
         let candidate_path = Path::new(&candidate);
         let rel = match candidate_path.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().to_string(),
+            Ok(r) => to_forward_slash(r.to_string_lossy().into_owned()),
             Err(_) => continue,
         };
         if known_files.contains(&rel) {
@@ -893,7 +926,7 @@ fn resolve_import(
         let candidate = format!("{}{idx}", resolved.to_string_lossy());
         let candidate_path = Path::new(&candidate);
         let rel = match candidate_path.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().to_string(),
+            Ok(r) => to_forward_slash(r.to_string_lossy().into_owned()),
             Err(_) => continue,
         };
         if known_files.contains(&rel) {
@@ -949,7 +982,10 @@ fn resolve_rust_import(
                 let target = if base.as_os_str().is_empty() {
                     rest
                 } else {
-                    format!("{}/{rest}", base.display())
+                    format!(
+                        "{}/{rest}",
+                        to_forward_slash(base.to_string_lossy().into_owned())
+                    )
                 };
                 try_rust_module(&target, known_files, &[""])
             }
@@ -963,13 +999,16 @@ fn resolve_rust_import(
             let parent = file_path.parent()?;
 
             let self_dir = if matches!(file_name, "mod.rs" | "lib.rs" | "main.rs") {
-                parent.to_string_lossy().to_string()
+                to_forward_slash(parent.to_string_lossy().into_owned())
             } else {
                 let stem = file_path.file_stem()?.to_str()?;
                 if parent.as_os_str().is_empty() {
                     stem.to_string()
                 } else {
-                    format!("{}/{stem}", parent.display())
+                    format!(
+                        "{}/{stem}",
+                        to_forward_slash(parent.to_string_lossy().into_owned())
+                    )
                 }
             };
 
@@ -997,7 +1036,7 @@ fn try_rust_module(path: &str, known_files: &HashSet<String>, prefixes: &[&str])
 }
 
 fn try_rust_module_file(dir: &Path, known_files: &HashSet<String>) -> Option<String> {
-    let dir_str = dir.to_string_lossy();
+    let dir_str = to_forward_slash(dir.to_string_lossy().into_owned());
     for name in ["mod.rs", "lib.rs", "main.rs"] {
         let candidate = if dir_str.is_empty() {
             name.to_string()
@@ -1034,11 +1073,14 @@ fn resolve_python_import(
 
     let module_path = module_part.replace('.', "/");
     let target = if module_path.is_empty() {
-        base.to_string_lossy().to_string()
+        to_forward_slash(base.to_string_lossy().into_owned())
     } else if base.as_os_str().is_empty() {
         module_path
     } else {
-        format!("{}/{module_path}", base.display())
+        format!(
+            "{}/{module_path}",
+            to_forward_slash(base.to_string_lossy().into_owned())
+        )
     };
 
     for suffix in [".py", "/__init__.py"] {
@@ -1079,7 +1121,7 @@ fn resolve_go_import(
                 return false;
             }
             match Path::new(f.as_str()).parent() {
-                Some(p) => p.to_string_lossy() == rel_dir,
+                Some(p) => to_forward_slash(p.to_string_lossy().into_owned()) == rel_dir,
                 None => false,
             }
         })
@@ -1144,9 +1186,11 @@ fn resolve_dart_import(
         } else {
             format!("{pkg_dir}/lib/{tail}")
         };
-        let normalized = normalize_path(Path::new(&candidate))
-            .to_string_lossy()
-            .to_string();
+        let normalized = to_forward_slash(
+            normalize_path(Path::new(&candidate))
+                .to_string_lossy()
+                .into_owned(),
+        );
         if known_files.contains(&normalized) {
             return vec![normalized];
         }
@@ -1191,7 +1235,7 @@ fn read_dart_packages(root: &Path) -> HashMap<String, String> {
         };
 
         let rel_dir = match path.parent().and_then(|p| p.strip_prefix(root).ok()) {
-            Some(p) => p.to_string_lossy().replace('\\', "/"),
+            Some(p) => to_forward_slash(p.to_string_lossy().into_owned()),
             None => continue,
         };
 
@@ -1264,8 +1308,8 @@ fn file_mtime_ns(metadata: &std::fs::Metadata) -> i64 {
 /// Remove a single deleted file's rows from the index, if present.
 fn delete_single_file(tx: &Connection, root: &Path, path: &Path) -> Result<bool> {
     let rel_path = match path.strip_prefix(root) {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => path.to_string_lossy().to_string(),
+        Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
+        Err(_) => to_forward_slash(path.to_string_lossy().into_owned()),
     };
     if let Some(existing) = read::get_file_by_path(tx, &rel_path)? {
         write::delete_file_data(tx, existing.id)?;
@@ -1286,8 +1330,8 @@ fn try_reingest_changed_file(
     indexed: &mut Vec<IndexedFile>,
 ) -> Result<bool> {
     let rel_path = match file_path.strip_prefix(root) {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => file_path.to_string_lossy().to_string(),
+        Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
+        Err(_) => to_forward_slash(file_path.to_string_lossy().into_owned()),
     };
 
     let metadata = match std::fs::metadata(file_path) {
@@ -1439,6 +1483,182 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use tempfile::TempDir;
+
+    // --- replace_backslashes_with_slashes: platform-independent ----------
+    //
+    // These assertions run on every platform because they target the raw
+    // replacement, not the `MAIN_SEPARATOR`-guarded wrapper. They pin the
+    // exact behavior that Windows builds will see at runtime.
+
+    #[test]
+    fn raw_replace_empty_string_is_empty() {
+        assert_eq!(replace_backslashes_with_slashes(String::new()), "");
+    }
+
+    #[test]
+    fn raw_replace_pure_forward_slash_is_unchanged() {
+        assert_eq!(
+            replace_backslashes_with_slashes("src/lib.rs".to_string()),
+            "src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn raw_replace_pure_backslash_becomes_forward_slash() {
+        assert_eq!(
+            replace_backslashes_with_slashes("src\\lib.rs".to_string()),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            replace_backslashes_with_slashes("crates\\foo\\src\\mod.rs".to_string()),
+            "crates/foo/src/mod.rs"
+        );
+    }
+
+    #[test]
+    fn raw_replace_mixed_separators_normalize() {
+        // Path::join on Windows against a forward-slash base yields mixed.
+        assert_eq!(
+            replace_backslashes_with_slashes("src/sub\\leaf.rs".to_string()),
+            "src/sub/leaf.rs"
+        );
+        assert_eq!(
+            replace_backslashes_with_slashes("a\\b/c\\d/e.rs".to_string()),
+            "a/b/c/d/e.rs"
+        );
+    }
+
+    #[test]
+    fn raw_replace_consecutive_backslashes_each_rewritten() {
+        // No collapsing - a literal `\\` becomes `//`. Paths like UNC would
+        // be mangled, but index keys never contain UNC prefixes, and matching
+        // produces the same transformation on both sides.
+        assert_eq!(
+            replace_backslashes_with_slashes("a\\\\b.rs".to_string()),
+            "a//b.rs"
+        );
+    }
+
+    #[test]
+    fn raw_replace_preserves_unicode() {
+        assert_eq!(
+            replace_backslashes_with_slashes("src\\тест\\файл.rs".to_string()),
+            "src/тест/файл.rs"
+        );
+    }
+
+    #[test]
+    fn raw_replace_drive_letter_path_is_normalized() {
+        // Realistic Windows absolute path after some code converted via `display()`.
+        assert_eq!(
+            replace_backslashes_with_slashes("C:\\project\\src\\lib.rs".to_string()),
+            "C:/project/src/lib.rs"
+        );
+    }
+
+    // --- to_forward_slash helper (platform-guarded wrapper) --------------
+
+    #[test]
+    fn to_forward_slash_leaves_forward_slashes_alone() {
+        assert_eq!(to_forward_slash("src/lib.rs"), "src/lib.rs");
+        assert_eq!(to_forward_slash(""), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn to_forward_slash_preserves_backslashes_on_unix() {
+        // On Unix, `\` is a legal filename character. Rewriting would corrupt paths.
+        assert_eq!(to_forward_slash("weird\\name.rs"), "weird\\name.rs");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn to_forward_slash_rewrites_backslashes_on_windows() {
+        assert_eq!(to_forward_slash("src\\lib.rs"), "src/lib.rs");
+        assert_eq!(
+            to_forward_slash("crates\\foo\\src\\mod.rs"),
+            "crates/foo/src/mod.rs"
+        );
+        // Mixed separators (as produced by Path::join over a forward-slash base)
+        // also normalize cleanly.
+        assert_eq!(to_forward_slash("src/sub\\leaf.rs"), "src/sub/leaf.rs");
+    }
+
+    /// Simulation test: exercises the Windows code path on Unix by feeding
+    /// hand-crafted backslash candidate strings through the raw replacement
+    /// and matching them against a forward-slash `known_files` set. This
+    /// proves that if a Windows build produces a backslash candidate from
+    /// `Path::join`, the normalization is sufficient to match the index key.
+    #[test]
+    fn simulated_windows_candidate_matches_forward_slash_known_key() {
+        let mut known: HashSet<String> = HashSet::new();
+        known.insert("src/utils.ts".to_string());
+        known.insert("crates/foo/src/mod.rs".to_string());
+
+        // Candidate as Windows would produce it after Path::join + strip_prefix.
+        let winlike = "src\\utils.ts".to_string();
+        let normalized = replace_backslashes_with_slashes(winlike);
+        assert!(known.contains(&normalized), "got: {normalized}");
+
+        let winlike2 = "crates\\foo\\src\\mod.rs".to_string();
+        let normalized2 = replace_backslashes_with_slashes(winlike2);
+        assert!(known.contains(&normalized2), "got: {normalized2}");
+
+        // Negative: a path NOT in the set must still miss.
+        let winlike3 = "src\\missing.ts".to_string();
+        let normalized3 = replace_backslashes_with_slashes(winlike3);
+        assert!(!known.contains(&normalized3));
+    }
+
+    /// Platform-agnostic sanity: a PathBuf built with the native separator
+    /// must round-trip to a forward-slash index key. On Unix this is trivial,
+    /// on Windows it exercises the replacement path.
+    #[test]
+    fn to_forward_slash_normalizes_native_pathbuf() {
+        let mut p = std::path::PathBuf::new();
+        p.push("src");
+        p.push("lib.rs");
+        assert_eq!(
+            to_forward_slash(p.to_string_lossy().into_owned()),
+            "src/lib.rs"
+        );
+    }
+
+    /// Regression guard: every file key persisted by `full_index` must use
+    /// forward slashes on every platform. Runs on real disk + SQLite so any
+    /// future ingest path that forgets to normalize will fail here instead
+    /// of silently breaking Windows import resolution again.
+    #[test]
+    fn full_index_persists_forward_slash_keys() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("nested").join("inside")).unwrap();
+        fs::write(root.join("top.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("nested/mid.rs"), "fn a() {}").unwrap();
+        fs::write(root.join("nested/inside/deep.rs"), "fn b() {}").unwrap();
+
+        let conn = storage::open_in_memory().unwrap();
+        full_index(&conn, root, true).unwrap();
+
+        let paths: Vec<String> = read::get_all_files(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+
+        for p in &paths {
+            assert!(!p.contains('\\'), "index key contains backslash: {p}");
+        }
+        assert!(paths.iter().any(|p| p == "top.rs"), "paths: {paths:?}");
+        assert!(
+            paths.iter().any(|p| p == "nested/mid.rs"),
+            "paths: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == "nested/inside/deep.rs"),
+            "paths: {paths:?}"
+        );
+    }
 
     // --- TS/JS resolver ---
 

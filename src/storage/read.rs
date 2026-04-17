@@ -86,11 +86,16 @@ const SYMBOL_FILE_JOIN_COLS: &str = "s.id, s.file_id, s.name, s.kind, s.line_sta
      f.indexed_at AS f_indexed_at, f.change_count AS f_change_count";
 
 pub fn get_file_by_path(conn: &Connection, path: &str) -> Result<Option<FileRow>> {
+    // Index keys are always forward-slash; MCP tool callers on Windows may
+    // pass either separator style. Normalize at this chokepoint so every
+    // caller (11 server tools plus a few storage internals) gets consistent
+    // behavior without each having to remember.
+    let path = crate::index::to_forward_slash(path.to_string());
     let result = conn
         .query_row(
             "SELECT id, path, mtime_ns, size_bytes, language, line_count, pagerank, indexed_at, change_count
              FROM files WHERE path = ?1",
-            [path],
+            [path.as_str()],
             row_to_file,
         )
         .optional()?;
@@ -1027,6 +1032,37 @@ mod tests {
 
         let missing = get_file_by_path(&conn, "nonexistent.rs").unwrap();
         assert!(missing.is_none());
+    }
+
+    /// On Windows, MCP callers may pass either separator style. The lookup
+    /// must succeed regardless so tools like `qartez_outline`, `qartez_impact`,
+    /// and `qartez_rename_file` don't silently return "File not found" when
+    /// the user copy-pastes a Windows-style path.
+    #[test]
+    #[cfg(windows)]
+    fn get_file_by_path_accepts_backslash_input_on_windows() {
+        let conn = setup();
+        insert_test_file(&conn, "src/main.rs");
+
+        let file = get_file_by_path(&conn, "src\\main.rs").unwrap();
+        assert!(
+            file.is_some(),
+            "backslash input should match forward-slash DB key on Windows"
+        );
+        assert_eq!(file.unwrap().path, "src/main.rs");
+    }
+
+    /// On Unix, `\` is a legal filename character and must NOT be rewritten.
+    /// If someone inserts a literal `src\main.rs` on Unix, lookup by that
+    /// exact string should work and forward-slash input must not match it.
+    #[test]
+    #[cfg(unix)]
+    fn get_file_by_path_preserves_backslash_input_on_unix() {
+        let conn = setup();
+        insert_test_file(&conn, "src\\weird.rs");
+
+        assert!(get_file_by_path(&conn, "src\\weird.rs").unwrap().is_some());
+        assert!(get_file_by_path(&conn, "src/weird.rs").unwrap().is_none());
     }
 
     #[test]

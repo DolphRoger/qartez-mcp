@@ -21,8 +21,6 @@
     <a href="CHANGELOG.md">Changelog</a>
   </p>
   <p align="center">
-    <a href="https://crates.io/crates/qartez-mcp"><img alt="crates.io" src="https://img.shields.io/crates/v/qartez-mcp.svg?logo=rust"></a>
-    <a href="https://crates.io/crates/qartez-mcp"><img alt="downloads" src="https://img.shields.io/crates/d/qartez-mcp.svg"></a>
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-dual-blue.svg"></a>
     <img alt="MSRV 1.88" src="https://img.shields.io/badge/MSRV-1.88-orange.svg">
     <img alt="37 languages" src="https://img.shields.io/badge/languages-37-green.svg">
@@ -54,7 +52,7 @@ The fix isn't a smarter model. It's a smarter index.
 
 ## Quickstart
 
-**Platform support:** macOS 13+, Ubuntu 22.04+ (and other modern Linux), Windows via [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install). Architectures: x86_64 and arm64. Rust MSRV is **1.88** - the installer fetches it via [rustup](https://rustup.rs/) if missing.
+**Platform support:** macOS 13+, Ubuntu 22.04+ (and other modern Linux), Windows (native PowerShell 5.1+/7+) and WSL 2. Architectures: x86_64 and arm64. Rust MSRV is **1.88** - the installer fetches it via [rustup](https://rustup.rs/) if missing.
 
 ### Install (recommended)
 
@@ -63,6 +61,12 @@ curl -sSfL https://qartez.dev/install | sh
 ```
 
 The installer checks for Rust, builds the three release binaries (`qartez`, `qartez-guard`, `qartez-setup`), installs them to `~/.local/bin/`, and launches `qartez-setup` in non-interactive mode. The setup wizard auto-detects every MCP-capable IDE on your machine and configures them all in one pass, including the modification-guard hooks for Claude Code.
+
+Windows (native PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "iwr https://qartez.dev/install.ps1 -useb | iex"
+```
 
 Open any project in your IDE - Qartez indexes it automatically on session start. No manual step needed. The file watcher keeps the index fresh as you edit.
 

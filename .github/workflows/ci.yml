@@ -48,6 +48,15 @@ jobs:
       - name: cargo test --release --no-fail-fast
         run: cargo test --release --no-fail-fast
 
+      - name: POSIX installer portability checks
+        if: runner.os != 'Windows'
+        run: bash ./tests/test-install.sh
+
+      - name: Windows installer dry-run checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/test-install.ps1
+
   msrv:
     name: MSRV (1.88) / ubuntu-latest
     runs-on: ubuntu-latest

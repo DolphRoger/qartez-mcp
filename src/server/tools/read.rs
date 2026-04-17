@@ -132,7 +132,12 @@ impl QartezServer {
             return Err("No non-empty symbol names provided".to_string());
         }
 
-        let file_filter = params.file_path.as_deref();
+        // Normalize the file_path filter so Windows callers can pass either
+        // separator style and still substring-match forward-slash DB keys.
+        let file_filter: Option<String> = params
+            .file_path
+            .as_deref()
+            .map(|s| crate::index::to_forward_slash(s.to_string()));
 
         let conn = self.db.lock().map_err(|e| format!("DB lock error: {e}"))?;
 
@@ -153,10 +158,10 @@ impl QartezServer {
                 Ok(r) => r,
                 Err(e) => return Err(format!("DB error: {e}")),
             };
-            let filtered: Vec<_> = if let Some(fp) = file_filter {
+            let filtered: Vec<_> = if let Some(ref fp) = file_filter {
                 results
                     .into_iter()
-                    .filter(|(_, file)| file.path.contains(fp))
+                    .filter(|(_, file)| file.path.contains(fp.as_str()))
                     .collect()
             } else {
                 results
@@ -235,7 +240,7 @@ impl QartezServer {
 
         if !rendered_any {
             let joined = queries.join(", ");
-            if let Some(fp) = file_filter {
+            if let Some(ref fp) = file_filter {
                 return Err(format!(
                     "No symbols [{joined}] found in file matching '{fp}'"
                 ));

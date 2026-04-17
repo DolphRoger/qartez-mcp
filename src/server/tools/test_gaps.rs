@@ -125,11 +125,13 @@ impl QartezServer {
 
         if let Some(ref fp) = params.file_path {
             let resolved = self.safe_resolve(fp).map_err(|e| e.to_string())?;
-            let rel = resolved
-                .strip_prefix(&self.project_root)
-                .unwrap_or(&resolved)
-                .to_string_lossy()
-                .to_string();
+            let rel = crate::index::to_forward_slash(
+                resolved
+                    .strip_prefix(&self.project_root)
+                    .unwrap_or(&resolved)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
 
             if is_test_path(&rel) {
                 let sources = test_to_sources

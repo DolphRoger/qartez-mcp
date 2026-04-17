@@ -50,9 +50,12 @@ impl QartezServer {
         let all_files = read::get_all_files(&conn).map_err(|e| format!("DB error: {e}"))?;
 
         let file_paths: Vec<String> = if let Some(ref prefix) = params.file_path {
+            // Normalize user input so Windows callers can pass either
+            // separator style and still match forward-slash DB keys.
+            let normalized = crate::index::to_forward_slash(prefix.clone());
             all_files
                 .iter()
-                .filter(|f| f.path.starts_with(prefix.as_str()))
+                .filter(|f| f.path.starts_with(normalized.as_str()))
                 .map(|f| f.path.clone())
                 .collect()
         } else {

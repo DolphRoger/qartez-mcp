@@ -66,7 +66,7 @@ mod tests {
         let mut out: Vec<String> = files
             .iter()
             .filter_map(|p| p.strip_prefix(root).ok())
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| super::super::to_forward_slash(p.to_string_lossy().into_owned()))
             .collect();
         out.sort();
         out

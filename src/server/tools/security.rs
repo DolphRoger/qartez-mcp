@@ -78,7 +78,11 @@ impl QartezServer {
             include_tests,
             category_filter: params.category.clone(),
             min_severity,
-            file_path_filter: params.file_path.clone(),
+            // Windows callers may pass either separator; DB keys are forward-slash.
+            file_path_filter: params
+                .file_path
+                .as_ref()
+                .map(|s| crate::index::to_forward_slash(s.clone())),
             project_roots: self.project_roots.clone(),
         };
 

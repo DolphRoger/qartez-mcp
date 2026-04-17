@@ -19,8 +19,6 @@ use dialoguer::MultiSelect;
 
 // -- Embedded hook assets (source of truth lives in scripts/) ----------------
 
-const GUARD_HOOK_SH: &str = include_str!("../../scripts/qartez-guard.sh");
-const SESSION_START_SH: &str = include_str!("../../scripts/qartez-session-start.sh");
 const CLAUDE_MD_SNIPPET: &str = include_str!("../../scripts/CLAUDE.md.snippet");
 const AGENTS_MD_SNIPPET: &str = include_str!("../../scripts/AGENTS.md.snippet");
 const CURSOR_RULE_MDC: &str = include_str!("../../scripts/cursor-rule.mdc");
@@ -34,6 +32,23 @@ const INSTRUCTIONS_MD: &str = include_str!("../../scripts/instructions.md");
 const SKILL_MD: &str = include_str!("../../scripts/skill/SKILL.md");
 const SKILL_TOOLS_MD: &str = include_str!("../../scripts/skill/references/tools.md");
 const SKILL_GUARD_MD: &str = include_str!("../../scripts/skill/references/guard.md");
+const SKILL_RUNTIME_CONTRACT_MD: &str =
+    include_str!("../../scripts/skill/references/runtime-contract.md");
+const SKILL_SUBAGENT_CONTRACT_MD: &str =
+    include_str!("../../scripts/skill/references/subagent-contract.md");
+const SKILL_HOST_MATRIX_MD: &str = include_str!("../../scripts/skill/references/host-matrix.md");
+const SKILL_CONFIDENCE_MODEL_MD: &str =
+    include_str!("../../scripts/skill/references/confidence-model.md");
+const SKILL_DOCTRINE_EXPLORE_MD: &str =
+    include_str!("../../scripts/skill/references/doctrine-explore.md");
+const SKILL_DOCTRINE_DEBUG_MD: &str =
+    include_str!("../../scripts/skill/references/doctrine-debug.md");
+const SKILL_DOCTRINE_REVIEW_MD: &str =
+    include_str!("../../scripts/skill/references/doctrine-review.md");
+const SKILL_DOCTRINE_REFACTOR_MD: &str =
+    include_str!("../../scripts/skill/references/doctrine-refactor.md");
+const SKILL_DOCTRINE_PREMERGE_MD: &str =
+    include_str!("../../scripts/skill/references/doctrine-premerge.md");
 
 // -- CLI ---------------------------------------------------------------------
 
@@ -63,6 +78,13 @@ struct Cli {
     /// (24h TTL) and silent on no-op. Used by qartez-mcp on startup.
     #[arg(long, hide = true)]
     update_background: bool,
+
+    /// Internal flag: session-start hook entry point.
+    /// Implements the auto-indexing behavior from qartez-session-start.sh in Rust.
+    /// Detects project, checks for .qartez marker, validates repo markers,
+    /// locates qartez-mcp binary, and spawns a detached background reindex.
+    #[arg(long, hide = true)]
+    session_start: bool,
 }
 
 // -- IDE registry ------------------------------------------------------------
@@ -337,10 +359,28 @@ fn home_dir() -> PathBuf {
 }
 
 /// Portable home directory lookup without pulling in the `dirs` crate.
+/// Checks HOME (Unix), USERPROFILE (Windows), HOMEDRIVE+HOMEPATH (Windows),
+/// then falls back to current directory.
 fn dirs_replacement() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .expect("$HOME is not set")
+    // Try HOME (Unix)
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home);
+    }
+    // Try USERPROFILE (Windows)
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return PathBuf::from(profile);
+    }
+    // Try HOMEDRIVE+HOMEPATH (Windows fallback)
+    if let (Some(drive), Some(path)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+    {
+        let mut combined = PathBuf::from(drive);
+        combined.push(path);
+        if combined.is_dir() {
+            return combined;
+        }
+    }
+    // Fallback to current directory
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Claude Desktop's config directory varies by platform.
@@ -583,6 +623,7 @@ fn strip_jsonc(text: &str) -> String {
 /// Find the qartez-mcp binary, checking standard locations.
 fn find_binary(name: &str) -> Option<PathBuf> {
     let home = home_dir();
+
     let candidates = [
         home.join(".local").join("bin").join(name),
         // Also try the cargo target dir relative to this binary
@@ -595,6 +636,13 @@ fn find_binary(name: &str) -> Option<PathBuf> {
         if c.is_file() {
             return Some(c.clone());
         }
+        // On Windows, try with .exe suffix
+        if cfg!(windows) {
+            let with_exe = c.with_extension("exe");
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
+        }
     }
     // Check PATH
     which_in_path(name)
@@ -603,9 +651,19 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 fn which_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
+        // Try the bare name first
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
+        }
+        // On Windows, also try with common executable extensions
+        if cfg!(windows) {
+            for ext in &["exe", "cmd", "bat", "com"] {
+                let with_ext = dir.join(format!("{name}.{ext}"));
+                if with_ext.is_file() {
+                    return Some(with_ext);
+                }
+            }
         }
     }
     None
@@ -817,23 +875,19 @@ fn install_claude(bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_claude_one(claude_dir: &Path, bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
+fn install_claude_one(
+    claude_dir: &Path,
+    bin: &str,
+    _guard_bin: Option<&str>,
+) -> anyhow::Result<()> {
     let hooks_dir = claude_dir.join("hooks");
     let settings_path = claude_dir.join("settings.json");
 
     info(&format!("» {}", claude_dir.display()));
 
-    // 1. Install hook scripts
-    fs::create_dir_all(&hooks_dir)?;
-    let guard_sh = hooks_dir.join("qartez-guard.sh");
-    fs::write(&guard_sh, GUARD_HOOK_SH)?;
-    make_executable(&guard_sh)?;
-    info(&format!("Hook installed: {}", guard_sh.display()));
-
-    let session_sh = hooks_dir.join("qartez-session-start.sh");
-    fs::write(&session_sh, SESSION_START_SH)?;
-    make_executable(&session_sh)?;
-    info(&format!("Hook installed: {}", session_sh.display()));
+    // Remove legacy shell hook wrappers. Hooks are configured to invoke
+    // binaries directly, so shell scripts are no longer required.
+    remove_legacy_hook_files(&hooks_dir)?;
 
     // 2. Configure settings.json
     ensure_parent(&settings_path)?;
@@ -844,25 +898,33 @@ fn install_claude_one(claude_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
         settings["hooks"] = serde_json::json!({});
     }
 
-    // Absolute hook commands so they resolve regardless of which claude
-    // home the shell's `~` currently refers to.
-    let guard_cmd = format!("bash {}", guard_sh.display());
-    let session_cmd = format!("bash {}", session_sh.display());
+    // Use qartez-guard binary directly (no bash dependency)
+    let guard_bin_path = find_binary("qartez-guard").map(|p| p.to_string_lossy().into_owned());
+
+    // Use qartez-setup --session-start for session start hook (no bash dependency)
+    let setup_bin_path = find_binary("qartez-setup")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "qartez-setup".to_string());
+    let session_cmd = format!("{setup_bin_path} --session-start");
 
     // PreToolUse: Glob|Grep guard
-    ensure_hook_entry(
-        &mut settings,
-        "PreToolUse",
-        HookEntry {
-            matcher: "Glob|Grep",
-            search_term: "qartez-guard",
-            command: &guard_cmd,
-            timeout: 3000,
-        },
-    );
+    if let Some(guard) = guard_bin_path.as_deref() {
+        ensure_hook_entry(
+            &mut settings,
+            "PreToolUse",
+            HookEntry {
+                matcher: "Glob|Grep",
+                search_term: "qartez-guard",
+                command: guard,
+                timeout: 3000,
+            },
+        );
+    } else {
+        warn("qartez-guard binary not found; glob/grep guard hook skipped");
+    }
 
     // PreToolUse: Edit|Write|MultiEdit modification guard
-    if let Some(guard) = guard_bin {
+    if let Some(guard) = guard_bin_path.as_deref() {
         ensure_hook_entry(
             &mut settings,
             "PreToolUse",
@@ -1079,23 +1141,19 @@ fn install_gemini(bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_gemini_one(gemini_dir: &Path, bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
+fn install_gemini_one(
+    gemini_dir: &Path,
+    bin: &str,
+    _guard_bin: Option<&str>,
+) -> anyhow::Result<()> {
     let hooks_dir = gemini_dir.join("hooks");
     let settings_path = gemini_dir.join("settings.json");
 
     info(&format!("» {}", gemini_dir.display()));
 
-    // 1. Install hook scripts
-    fs::create_dir_all(&hooks_dir)?;
-    let guard_sh = hooks_dir.join("qartez-guard.sh");
-    fs::write(&guard_sh, GUARD_HOOK_SH)?;
-    make_executable(&guard_sh)?;
-    info(&format!("Hook installed: {}", guard_sh.display()));
-
-    let session_sh = hooks_dir.join("qartez-session-start.sh");
-    fs::write(&session_sh, SESSION_START_SH)?;
-    make_executable(&session_sh)?;
-    info(&format!("Hook installed: {}", session_sh.display()));
+    // Remove legacy shell hook wrappers. Hooks are configured to invoke
+    // binaries directly, so shell scripts are no longer required.
+    remove_legacy_hook_files(&hooks_dir)?;
 
     // 2. Configure settings.json
     ensure_parent(&settings_path)?;
@@ -1105,23 +1163,33 @@ fn install_gemini_one(gemini_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
         settings["hooks"] = serde_json::json!({});
     }
 
-    let guard_cmd = format!("bash {}", guard_sh.display());
-    let session_cmd = format!("bash {}", session_sh.display());
+    // Use qartez-guard binary directly (no bash dependency)
+    let guard_bin_path = find_binary("qartez-guard").map(|p| p.to_string_lossy().into_owned());
+
+    // Use qartez-setup --session-start for session start hook (no bash dependency)
+    let setup_bin_path = find_binary("qartez-setup")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "qartez-setup".to_string());
+    let session_cmd = format!("{setup_bin_path} --session-start");
 
     // BeforeTool: glob|grep_search guard
-    ensure_hook_entry(
-        &mut settings,
-        "BeforeTool",
-        HookEntry {
-            matcher: "glob|grep_search",
-            search_term: "qartez-guard",
-            command: &guard_cmd,
-            timeout: 3000,
-        },
-    );
+    if let Some(guard) = guard_bin_path.as_deref() {
+        ensure_hook_entry(
+            &mut settings,
+            "BeforeTool",
+            HookEntry {
+                matcher: "glob|grep_search",
+                search_term: "qartez-guard",
+                command: guard,
+                timeout: 3000,
+            },
+        );
+    } else {
+        warn("qartez-guard binary not found; glob/grep guard hook skipped");
+    }
 
     // BeforeTool: replace|write_file modification guard
-    if let Some(guard) = guard_bin {
+    if let Some(guard) = guard_bin_path.as_deref() {
         ensure_hook_entry(
             &mut settings,
             "BeforeTool",
@@ -1132,6 +1200,8 @@ fn install_gemini_one(gemini_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
                 timeout: 3000,
             },
         );
+    } else {
+        warn("qartez-guard binary not found; modification guard hook skipped");
     }
 
     // SessionStart: auto-indexing
@@ -1181,7 +1251,12 @@ fn uninstall_gemini_one(gemini_dir: &Path) -> anyhow::Result<()> {
 
     info(&format!("» {}", gemini_dir.display()));
 
-    for name in ["qartez-guard.sh", "qartez-session-start.sh"] {
+    for name in [
+        "qartez-guard.sh",
+        "qartez-session-start.sh",
+        "qartez-guard.ps1",
+        "qartez-session-start.ps1",
+    ] {
         let path = hooks_dir.join(name);
         if path.is_file() {
             fs::remove_file(&path)?;
@@ -1355,10 +1430,28 @@ fn install_skill(claude_dir: &Path) -> anyhow::Result<()> {
     let skill_path = skill_dir.join("SKILL.md");
     let tools_path = refs_dir.join("tools.md");
     let guard_path = refs_dir.join("guard.md");
+    let runtime_contract_path = refs_dir.join("runtime-contract.md");
+    let subagent_contract_path = refs_dir.join("subagent-contract.md");
+    let host_matrix_path = refs_dir.join("host-matrix.md");
+    let confidence_model_path = refs_dir.join("confidence-model.md");
+    let doctrine_explore_path = refs_dir.join("doctrine-explore.md");
+    let doctrine_debug_path = refs_dir.join("doctrine-debug.md");
+    let doctrine_review_path = refs_dir.join("doctrine-review.md");
+    let doctrine_refactor_path = refs_dir.join("doctrine-refactor.md");
+    let doctrine_premerge_path = refs_dir.join("doctrine-premerge.md");
 
     fs::write(&skill_path, SKILL_MD)?;
     fs::write(&tools_path, SKILL_TOOLS_MD)?;
     fs::write(&guard_path, SKILL_GUARD_MD)?;
+    fs::write(&runtime_contract_path, SKILL_RUNTIME_CONTRACT_MD)?;
+    fs::write(&subagent_contract_path, SKILL_SUBAGENT_CONTRACT_MD)?;
+    fs::write(&host_matrix_path, SKILL_HOST_MATRIX_MD)?;
+    fs::write(&confidence_model_path, SKILL_CONFIDENCE_MODEL_MD)?;
+    fs::write(&doctrine_explore_path, SKILL_DOCTRINE_EXPLORE_MD)?;
+    fs::write(&doctrine_debug_path, SKILL_DOCTRINE_DEBUG_MD)?;
+    fs::write(&doctrine_review_path, SKILL_DOCTRINE_REVIEW_MD)?;
+    fs::write(&doctrine_refactor_path, SKILL_DOCTRINE_REFACTOR_MD)?;
+    fs::write(&doctrine_premerge_path, SKILL_DOCTRINE_PREMERGE_MD)?;
 
     info(&format!("Skill installed: {}", skill_dir.display()));
     Ok(())
@@ -1525,7 +1618,12 @@ fn uninstall_claude_one(claude_dir: &Path) -> anyhow::Result<()> {
     info(&format!("» {}", claude_dir.display()));
 
     // Remove hook files
-    for name in ["qartez-guard.sh", "qartez-session-start.sh"] {
+    for name in [
+        "qartez-guard.sh",
+        "qartez-session-start.sh",
+        "qartez-guard.ps1",
+        "qartez-session-start.ps1",
+    ] {
         let path = hooks_dir.join(name);
         if path.is_file() {
             fs::remove_file(&path)?;
@@ -1610,6 +1708,22 @@ fn remove_hook_entries_containing(
             settings["hooks"][hook_type] = serde_json::Value::Array(filtered);
         }
     }
+}
+
+fn remove_legacy_hook_files(hooks_dir: &Path) -> anyhow::Result<()> {
+    for name in [
+        "qartez-guard.sh",
+        "qartez-session-start.sh",
+        "qartez-guard.ps1",
+        "qartez-session-start.ps1",
+    ] {
+        let path = hooks_dir.join(name);
+        if path.is_file() {
+            fs::remove_file(&path)?;
+            info(&format!("Legacy hook removed: {}", path.display()));
+        }
+    }
+    Ok(())
 }
 
 // -- Cursor / Windsurf (shared JSON mcpServers pattern) ----------------------
@@ -2470,21 +2584,6 @@ fn current_codex_binary(content: &str) -> Option<String> {
     None
 }
 
-// -- Platform helpers --------------------------------------------------------
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = fs::Permissions::from_mode(0o755);
-    fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
-}
-
 // -- Main --------------------------------------------------------------------
 
 fn main() -> ExitCode {
@@ -2499,6 +2598,10 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.session_start {
+        return run_session_start();
+    }
 
     if cli.update || cli.update_background {
         return run_update(cli.update_background);
@@ -2641,9 +2744,117 @@ fn download_semantic_model() -> anyhow::Result<()> {
     Ok(())
 }
 
+// -- Session-start hook (Rust equivalent of qartez-session-start.sh) ----------
+
+/// Repo markers that indicate this is a real code project (not a random folder).
+const REPO_MARKERS: &[&str] = &[
+    ".git",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+];
+
+/// Rust implementation of the session-start hook behavior.
+/// Mirrors `scripts/qartez-session-start.sh` but requires no bash.
+fn run_session_start() -> anyhow::Result<()> {
+    let project_dir = std::env::var("CLAUDE_PROJECT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+
+    if project_dir.as_os_str().is_empty() || !project_dir.is_dir() {
+        return Ok(());
+    }
+
+    // Skip dangerous roots
+    let home = home_dir();
+    if project_dir == home || project_dir == PathBuf::from("/") {
+        return Ok(());
+    }
+
+    // Already indexed
+    if project_dir.join(".qartez").is_dir() {
+        return Ok(());
+    }
+
+    // Require at least one repo marker
+    let has_marker = REPO_MARKERS.iter().any(|m| project_dir.join(m).exists());
+    if !has_marker {
+        return Ok(());
+    }
+
+    // Locate qartez-mcp binary
+    let binary = find_binary("qartez-mcp").or_else(|| {
+        // Fallback: check QARTEZ_BINARY env var
+        std::env::var("QARTEZ_BINARY")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+    });
+
+    let Some(binary) = binary else {
+        return Ok(());
+    };
+
+    // Spawn detached background reindex
+    let log_dir = home.join(".cache").join("qartez-mcp");
+    let _ = fs::create_dir_all(&log_dir);
+    let log_file = log_dir.join("session-index.log");
+
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new(&binary)
+            .arg("--root")
+            .arg(&project_dir)
+            .arg("--reindex")
+            .stdout(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)?,
+            )
+            .stderr(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)?,
+            )
+            .stdin(Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED: u32 = 0x00000008;
+        let mut cmd = std::process::Command::new(&binary);
+        cmd.arg("--root")
+            .arg(&project_dir)
+            .arg("--reindex")
+            .stdout(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)?,
+            )
+            .stderr(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)?,
+            )
+            .stdin(Stdio::null())
+            .creation_flags(DETACHED);
+        cmd.spawn().ok();
+    }
+
+    Ok(())
+}
+
 // -- Auto-update -------------------------------------------------------------
 
 const QARTEZ_UPDATE_REPO: &str = "kuberstar/qartez-mcp";
+#[cfg(unix)]
 const QARTEZ_INSTALL_URL: &str =
     "https://raw.githubusercontent.com/kuberstar/qartez-mcp/main/install.sh";
 const UPDATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -2808,38 +3019,55 @@ fn run_update(background: bool) -> anyhow::Result<()> {
         latest.trim_start_matches('v'),
     );
 
-    // The `sh -c` form is the canonical install pattern documented in the
-    // README, but it is the only invocation in this file that goes through
-    // a shell parser. install_cmd is built solely from the compile-time
-    // constant QARTEZ_INSTALL_URL - no runtime input ever flows into the
-    // shell string. Changing QARTEZ_INSTALL_URL requires a code change and
-    // a rebuild, so there is no path for an attacker to alter what runs
-    // here without already controlling the binary.
-    let install_cmd = format!("curl -sSfL {QARTEZ_INSTALL_URL} | sh");
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(&install_cmd)
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn installer: {e}"))?;
-    let status = child
-        .wait()
-        .map_err(|e| anyhow::anyhow!("installer wait failed: {e}"))?;
+    #[cfg(unix)]
+    {
+        // The `sh -c` form is the canonical install pattern documented in the
+        // README, but it is the only invocation in this file that goes through
+        // a shell parser. install_cmd is built solely from the compile-time
+        // constant QARTEZ_INSTALL_URL - no runtime input ever flows into the
+        // shell string. Changing QARTEZ_INSTALL_URL requires a code change and
+        // a rebuild, so there is no path for an attacker to alter what runs
+        // here without already controlling the binary.
+        let install_cmd = format!("curl -sSfL {QARTEZ_INSTALL_URL} | sh");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&install_cmd)
+            .stdin(Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn installer: {e}"))?;
+        let status = child
+            .wait()
+            .map_err(|e| anyhow::anyhow!("installer wait failed: {e}"))?;
 
-    if !status.success() {
-        anyhow::bail!(
-            "installer exited with status {}",
-            status.code().unwrap_or(-1)
+        if !status.success() {
+            anyhow::bail!(
+                "installer exited with status {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        touch_update_cache();
+        eprintln!(
+            " {} Update complete: {} → {}",
+            style("✓").green().bold(),
+            current,
+            latest.trim_start_matches('v'),
         );
     }
 
-    touch_update_cache();
-    eprintln!(
-        "  {} Update complete: {} → {}",
-        style("✓").green().bold(),
-        current,
-        latest.trim_start_matches('v'),
-    );
+    #[cfg(windows)]
+    {
+        eprintln!(
+            " {} Auto-update on Windows requires WSL or Git Bash.",
+            style("[!]").yellow()
+        );
+        eprintln!(
+            " {} Visit https://github.com/kuberstar/qartez-mcp/releases to download v{} manually.",
+            style("[i]").cyan(),
+            latest.trim_start_matches('v'),
+        );
+    }
+
     Ok(())
 }
 
@@ -2995,6 +3223,13 @@ mod tests {
     // Serializes tests that mutate process-global env vars ($HOME, $PATH).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     struct EnvGuard {
         key: &'static str,
         original: Option<std::ffi::OsString>,
@@ -3023,7 +3258,7 @@ mod tests {
 
     #[test]
     fn update_cache_missing_is_not_fresh() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", tmp.path());
         assert!(!update_cache_is_fresh());
@@ -3031,7 +3266,7 @@ mod tests {
 
     #[test]
     fn update_cache_fresh_after_touch() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", tmp.path());
         touch_update_cache();
@@ -3040,7 +3275,7 @@ mod tests {
 
     #[test]
     fn update_cache_stale_when_mtime_exceeds_ttl() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", tmp.path());
         touch_update_cache();
@@ -3060,7 +3295,7 @@ mod tests {
 
     #[test]
     fn acquire_lock_succeeds_and_creates_file() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", tmp.path());
         let lock = acquire_update_lock();
@@ -3069,8 +3304,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn acquire_lock_returns_none_for_unwritable_lock_file() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", tmp.path());
         let dir = tmp.path().join(".qartez");
@@ -3093,7 +3329,7 @@ mod tests {
 
     #[test]
     fn lock_released_on_drop_allows_reacquire() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", tmp.path());
         {
@@ -3127,6 +3363,58 @@ mod tests {
         assert!(is_newer_version("v1.0.1-beta", "1.0.0"));
     }
 
+    #[test]
+    fn install_claude_removes_legacy_shell_hooks_and_uses_binary_session_start() {
+        let _mu = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let claude_dir = tmp.path().join(".claude");
+        let hooks = claude_dir.join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("qartez-guard.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(hooks.join("qartez-session-start.sh"), "#!/bin/sh\n").unwrap();
+
+        install_claude_one(&claude_dir, "qartez-mcp", None).unwrap();
+
+        assert!(!hooks.join("qartez-guard.sh").exists());
+        assert!(!hooks.join("qartez-session-start.sh").exists());
+
+        let settings = read_json(&claude_dir.join("settings.json")).unwrap();
+        let session_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(session_cmd.contains("qartez-setup"));
+        assert!(session_cmd.contains("--session-start"));
+        assert!(!session_cmd.contains(".sh"));
+    }
+
+    #[test]
+    fn install_gemini_removes_legacy_shell_hooks_and_uses_binary_session_start() {
+        let _mu = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let gemini_dir = tmp.path().join(".gemini");
+        let hooks = gemini_dir.join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("qartez-guard.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(hooks.join("qartez-session-start.sh"), "#!/bin/sh\n").unwrap();
+
+        install_gemini_one(&gemini_dir, "qartez-mcp", None).unwrap();
+
+        assert!(!hooks.join("qartez-guard.sh").exists());
+        assert!(!hooks.join("qartez-session-start.sh").exists());
+
+        let settings = read_json(&gemini_dir.join("settings.json")).unwrap();
+        let session_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(session_cmd.contains("qartez-setup"));
+        assert!(session_cmd.contains("--session-start"));
+        assert!(!session_cmd.contains(".sh"));
+    }
+
     // -- Mock curl for fetch_latest_release_tag ----------------------------
 
     #[cfg(unix)]
@@ -3148,7 +3436,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn fetch_release_tag_parses_valid_github_response() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_mock_curl(tmp.path(), r#"{"tag_name": "v0.2.0"}"#);
         let orig = std::env::var("PATH").unwrap_or_default();
@@ -3159,7 +3447,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn fetch_release_tag_rejects_invalid_json() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_mock_curl(tmp.path(), "not json");
         let orig = std::env::var("PATH").unwrap_or_default();
@@ -3170,7 +3458,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn fetch_release_tag_rejects_missing_tag_name() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_mock_curl(tmp.path(), r#"{"name": "Release"}"#);
         let orig = std::env::var("PATH").unwrap_or_default();
@@ -3181,7 +3469,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn fetch_release_tag_returns_error_on_curl_failure() {
-        let _mu = ENV_LOCK.lock().unwrap();
+        let _mu = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_mock_curl_failing(tmp.path(), 22);
         let orig = std::env::var("PATH").unwrap_or_default();
