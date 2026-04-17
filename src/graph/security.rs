@@ -337,14 +337,114 @@ pub fn compute_risk_score(severity: Severity, pagerank: f64, is_exported: bool) 
 // ---------------------------------------------------------------------------
 
 /// Returns true for paths that look like test/spec files.
+///
+/// A virtual leading `/` is prepended before substring matching so a
+/// top-level `tests/foo.rs` is recognised the same way as `src/tests/foo.rs`.
+/// Without that, the directory-prefixed patterns (`/tests/`, `/test_`,
+/// `/spec/`) would only fire when the test directory had a parent.
 fn is_test_path(path: &str) -> bool {
-    path.contains("/tests/")
-        || path.contains("/test_")
-        || path.contains("_test.")
-        || path.contains("/spec/")
-        || path.contains("_spec.")
-        || path.contains(".test.")
-        || path.contains(".spec.")
+    let normalized = format!("/{}", path.trim_start_matches('/'));
+    normalized.contains("/tests/")
+        || normalized.contains("/test_")
+        || normalized.contains("_test.")
+        || normalized.contains("/spec/")
+        || normalized.contains("_spec.")
+        || normalized.contains(".test.")
+        || normalized.contains(".spec.")
+}
+
+/// Find Rust `#[cfg(test)]` module blocks inside a source file. Returns
+/// inclusive 1-based line ranges spanning each block, including the
+/// attribute line itself.
+///
+/// Used to suppress security findings produced inside inline test modules
+/// (e.g. `#[cfg(test)] mod tests { ... }` in production source files) when
+/// the caller asked to skip tests but `is_test_path` did not match because
+/// the host file lives outside the conventional test directories.
+///
+/// Parses with `tree-sitter-rust` so the result is robust against
+/// multi-line strings, raw strings, byte strings, block comments, and
+/// every other construct that defeats line-based brace counting. If the
+/// parser fails to load (should not happen — the language is statically
+/// linked) the function returns an empty vector, which means findings
+/// inside test modules continue to surface as before; it never hides
+/// findings outside test modules.
+fn find_cfg_test_blocks(source: &str) -> Vec<(u32, u32)> {
+    use tree_sitter::{Language, Parser};
+
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&Language::new(tree_sitter_rust::LANGUAGE))
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+
+    let bytes = source.as_bytes();
+    let mut ranges = Vec::new();
+    collect_cfg_test_mod_ranges(tree.root_node(), bytes, &mut ranges);
+    ranges
+}
+
+/// Walk the AST collecting `(start_line, end_line)` 1-based ranges for
+/// every `mod_item` whose preceding sibling chain includes an
+/// `attribute_item` matching `#[cfg(test)]` or `#[cfg(any(test, ...))]`.
+/// Recurses into non-matching children so nested test modules are found.
+fn collect_cfg_test_mod_ranges(
+    node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    ranges: &mut Vec<(u32, u32)>,
+) {
+    if node.kind() == "mod_item"
+        && let Some(attr_row) = preceding_cfg_test_attr_row(node, bytes)
+    {
+        let start = (attr_row + 1) as u32;
+        let end = (node.end_position().row + 1) as u32;
+        ranges.push((start, end));
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_cfg_test_mod_ranges(child, bytes, ranges);
+    }
+}
+
+/// Walk back through prior siblings of `node`, skipping comments and
+/// non-cfg-test attributes. Return the topmost row that belongs to a
+/// `cfg(test)` attribute when one exists.
+fn preceding_cfg_test_attr_row(node: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<usize> {
+    let mut found_row = None;
+    let mut sib = node.prev_sibling();
+    while let Some(s) = sib {
+        match s.kind() {
+            "attribute_item" | "inner_attribute_item" => {
+                let text = std::str::from_utf8(&bytes[s.byte_range()]).unwrap_or("");
+                if attr_text_targets_test(text) {
+                    found_row = Some(s.start_position().row);
+                }
+                sib = s.prev_sibling();
+            }
+            "line_comment" | "block_comment" => {
+                sib = s.prev_sibling();
+            }
+            _ => break,
+        }
+    }
+    found_row
+}
+
+/// True when an attribute textual form names `test` as a cfg target.
+/// Covers `#[cfg(test)]`, `#[cfg(any(test, ...))]`, and the same forms
+/// nested inside `cfg_attr` predicates.
+fn attr_text_targets_test(text: &str) -> bool {
+    let stripped: String = text.split_whitespace().collect();
+    stripped.contains("cfg(test)")
+        || stripped.contains("cfg(any(test")
+        || stripped.contains(",test)")
+        || stripped.contains(",test,")
 }
 
 /// Compiled version of a [`SecurityRule`] with its pre-built regex.
@@ -414,7 +514,30 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
         };
         let lines: Vec<&str> = file_text.lines().collect();
 
+        // For Rust source files, locate inline `#[cfg(test)]` modules so
+        // their symbols can be skipped when tests are excluded. The path
+        // check (`is_test_path`) only catches files under conventional
+        // test directories; inline test modules in production files
+        // (e.g. `src/foo.rs` with `#[cfg(test)] mod tests {}`) need this.
+        let file_lang = symbols
+            .first()
+            .map(|s| file_language.get(&s.file_id).copied().unwrap_or(""))
+            .unwrap_or("");
+        let cfg_test_ranges: Vec<(u32, u32)> = if !opts.include_tests && file_lang == "rust" {
+            find_cfg_test_blocks(&file_text)
+        } else {
+            Vec::new()
+        };
+
         for sym in symbols {
+            if !cfg_test_ranges.is_empty()
+                && cfg_test_ranges
+                    .iter()
+                    .any(|(s, e)| sym.line_start >= *s && sym.line_end <= *e)
+            {
+                continue;
+            }
+
             let lang = file_language.get(&sym.file_id).copied().unwrap_or("");
             let pr = file_pagerank.get(&sym.file_id).copied().unwrap_or(0.0);
 
@@ -448,16 +571,10 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
                 let matched = match &cr.rule.pattern {
                     SecurityPattern::BodyRegex(_) => {
                         let body_match = cr.regex.is_match(&body);
-                        // SEC007: exclude safe localhost/loopback URLs to
-                        // reduce false positives.
                         if body_match && cr.rule.id == "SEC007" {
-                            cr.regex.find_iter(&body).any(|m| {
-                                let url = m.as_str();
-                                !url.starts_with("http://localhost")
-                                    && !url.starts_with("http://127.")
-                                    && !url.starts_with("http://0.0.0.0")
-                                    && !url.starts_with("http://[::1]")
-                            })
+                            cr.regex
+                                .find_iter(&body)
+                                .any(|m| !is_sec007_benign(m.as_str(), &body, m.start()))
                         } else {
                             body_match
                         }
@@ -511,6 +628,46 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     findings
+}
+
+/// SEC007 allowlist: returns true when an `http://` match should NOT be
+/// reported. Covers loopback literals, single-label internal hostnames
+/// (Docker/K8s service names, nginx upstreams), and XML-namespace URIs
+/// that are identifiers rather than URLs ever fetched over the network.
+fn is_sec007_benign(url: &str, body: &str, match_start: usize) -> bool {
+    if url.starts_with("http://localhost")
+        || url.starts_with("http://127.")
+        || url.starts_with("http://0.0.0.0")
+        || url.starts_with("http://[::1]")
+    {
+        return true;
+    }
+    // Single-label hostname: no dot in the host means it cannot resolve
+    // on public DNS, so it's an internal service name (Docker Compose,
+    // K8s service, nginx upstream). The SEC007 regex stops at `/`, `:`,
+    // or `_`, so the remainder after `http://` is the bare host.
+    let host = &url["http://".len()..];
+    if !host.contains('.') {
+        return true;
+    }
+    // Well-known XML namespace: `http://www.w3.org/*` identifies SVG,
+    // XHTML, XSL, MathML etc. and is never fetched.
+    if url.starts_with("http://www.w3.org") {
+        return true;
+    }
+    // Any URL appearing inside an `xmlns=` or `xmlns:foo=` attribute
+    // is a namespace identifier, not a network URL. Walk forward to the
+    // nearest UTF-8 char boundary so non-ASCII bytes in the preceding
+    // text (common in CSS/HTML) can't panic the slice.
+    let mut prefix_start = match_start.saturating_sub(32);
+    while prefix_start < match_start && !body.is_char_boundary(prefix_start) {
+        prefix_start += 1;
+    }
+    let prefix = &body[prefix_start..match_start];
+    if prefix.contains("xmlns=") || prefix.contains("xmlns:") {
+        return true;
+    }
+    false
 }
 
 /// Resolve a relative index path to an absolute path using the project roots.
@@ -608,6 +765,76 @@ mod tests {
     }
 
     #[test]
+    fn sec007_benign_loopback() {
+        // Loopback literals are filtered by the scan-time allowlist.
+        let body = "let u = \"http://localhost:3000\";";
+        let url = "http://localhost";
+        let start = body.find(url).unwrap();
+        assert!(is_sec007_benign(url, body, start));
+
+        let body = "curl http://127.0.0.1";
+        let url = "http://127.0.0.1";
+        // The regex only captures up to the first digit-only segment, but
+        // the literal prefix test covers the whole family.
+        assert!(is_sec007_benign(url, body, body.find(url).unwrap()));
+    }
+
+    #[test]
+    fn sec007_benign_single_label_host() {
+        // Docker/K8s/nginx-upstream-style internal hostnames never
+        // resolve publicly, so flagging them is a false positive.
+        let body = "proxy_pass http://backend;";
+        let url = "http://backend";
+        let start = body.find(url).unwrap();
+        assert!(is_sec007_benign(url, body, start));
+
+        let body = "upstream: http://redis";
+        let url = "http://redis";
+        assert!(is_sec007_benign(url, body, body.find(url).unwrap()));
+    }
+
+    #[test]
+    fn sec007_benign_w3c_namespace() {
+        // W3C namespace IRIs are identifiers, not URLs ever fetched.
+        let body = "<svg xmlns='http://www.w3.org/2000/svg'>";
+        let url = "http://www.w3.org";
+        let start = body.find(url).unwrap();
+        assert!(is_sec007_benign(url, body, start));
+    }
+
+    #[test]
+    fn sec007_benign_xmlns_context() {
+        // Any `xmlns=`/`xmlns:foo=` context marks the URL as a namespace.
+        let body = r#"<root xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">"#;
+        let url = "http://schemas.xmlsoap.org";
+        let start = body.find(url).unwrap();
+        assert!(is_sec007_benign(url, body, start));
+    }
+
+    #[test]
+    fn sec007_utf8_boundary_safe() {
+        // Multi-byte chars in the preceding text must not panic the
+        // char-boundary-snapped prefix slice.
+        let body = "описание: fetch(\"http://example.com/api\")";
+        let url = "http://example.com";
+        let start = body.find(url).unwrap();
+        assert!(!is_sec007_benign(url, body, start));
+    }
+
+    #[test]
+    fn sec007_flags_real_external_http() {
+        // Real external plaintext URLs must still be flagged.
+        let body = "fetch(\"http://example.com/api\")";
+        let url = "http://example.com";
+        let start = body.find(url).unwrap();
+        assert!(!is_sec007_benign(url, body, start));
+
+        let body = "const api = \"http://api.vendor.io/v1\";";
+        let url = "http://api.vendor.io";
+        assert!(!is_sec007_benign(url, body, body.find(url).unwrap()));
+    }
+
+    #[test]
     fn sec008_rust_only() {
         let rules = builtin_rules();
         let rule = rules.iter().find(|r| r.id == "SEC008").unwrap();
@@ -645,12 +872,26 @@ mod tests {
 
     #[test]
     fn test_path_detection() {
+        // With preceding directory.
         assert!(is_test_path("src/tests/foo.rs"));
         assert!(is_test_path("src/test_helper.py"));
+        assert!(is_test_path("src/spec/foo.rb"));
+        // Top-level test directories or test-prefixed files (this is the
+        // CLI-from-project-root case that used to slip through).
+        assert!(is_test_path("tests/foo.rs"));
+        assert!(is_test_path("test_helper.py"));
+        assert!(is_test_path("spec/foo.rb"));
+        // Leading slash should be normalised away, not double-counted.
+        assert!(is_test_path("/tests/foo.rs"));
+        // Filename-suffix patterns work anywhere.
         assert!(is_test_path("foo_test.go"));
         assert!(is_test_path("foo.test.ts"));
         assert!(is_test_path("foo.spec.js"));
+        // Negative cases.
         assert!(!is_test_path("src/server/mod.rs"));
+        assert!(!is_test_path("attests/foo.rs"));
+        assert!(!is_test_path("respec/foo.rb"));
+        assert!(!is_test_path(""));
     }
 
     #[test]
@@ -730,5 +971,240 @@ description = "AWS access key"
                 rule.id
             );
         }
+    }
+
+    #[test]
+    fn cfg_test_block_basic() {
+        let src = "fn foo() {}\n\
+                   \n\
+                   #[cfg(test)]\n\
+                   mod tests {\n\
+                       #[test]\n\
+                       fn t() {\n\
+                           let p = \"../etc/passwd\";\n\
+                       }\n\
+                   }\n\
+                   \n\
+                   fn bar() {}\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        let (s, e) = blocks[0];
+        assert_eq!(s, 3, "block starts at #[cfg(test)] line");
+        assert_eq!(e, 9, "block ends at closing brace of mod tests");
+    }
+
+    #[test]
+    fn cfg_test_block_named_module() {
+        let src = "#[cfg(test)]\n\
+                   mod safe_resolve_tests {\n\
+                       fn helper() {}\n\
+                   }\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], (1, 4));
+    }
+
+    #[test]
+    fn cfg_test_block_handles_braces_in_strings() {
+        // Unbalanced `{` and `}` inside string literals must not throw the
+        // brace counter off; otherwise post-block code could be wrongly
+        // included in the test range and real findings hidden.
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                       fn t() {\n\
+                           let a = \"{\";\n\
+                           let b = \"}\";\n\
+                       }\n\
+                   }\n\
+                   fn after() {}\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        let (_s, e) = blocks[0];
+        assert_eq!(e, 7, "string-literal braces must be ignored");
+    }
+
+    #[test]
+    fn cfg_test_block_ignores_non_module_attr() {
+        let src = "#[cfg(test)]\n\
+                   fn standalone_test() { let p = \"../foo\"; }\n";
+        // Only `mod` declarations are recognised; standalone `#[cfg(test)]`
+        // fns are out of scope for this filter.
+        assert!(find_cfg_test_blocks(src).is_empty());
+    }
+
+    #[test]
+    fn cfg_test_block_no_attr_returns_empty() {
+        let src = "fn foo() {}\nmod tests {}\n";
+        assert!(find_cfg_test_blocks(src).is_empty());
+    }
+
+    #[test]
+    fn cfg_test_block_skips_line_comments() {
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                       // close brace } in comment must be ignored\n\
+                       fn t() {}\n\
+                   }\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], (1, 5));
+    }
+
+    #[test]
+    fn cfg_test_block_handles_lifetimes() {
+        // A lifetime token `'a` must not be treated as a char literal,
+        // which would otherwise consume bytes and skew brace counting.
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                       fn t<'a>(s: &'a str) {}\n\
+                   }\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], (1, 4));
+    }
+
+    #[test]
+    fn cfg_test_block_pub_module() {
+        let src = "#[cfg(test)]\n\
+                   pub mod tests {\n\
+                       fn t() {}\n\
+                   }\n";
+        assert_eq!(find_cfg_test_blocks(src).len(), 1);
+    }
+
+    #[test]
+    fn cfg_test_block_multiple_in_one_file() {
+        let src = "#[cfg(test)]\n\
+                   mod first {\n    \
+                       fn a() {}\n\
+                   }\n\
+                   \n\
+                   fn between() {}\n\
+                   \n\
+                   #[cfg(test)]\n\
+                   mod second {\n    \
+                       fn b() {}\n\
+                   }\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 2, "two #[cfg(test)] blocks expected");
+        assert_eq!(blocks[0], (1, 4));
+        assert_eq!(blocks[1], (8, 11));
+    }
+
+    #[test]
+    fn cfg_test_block_deeply_nested_braces() {
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n    \
+                       fn t() {\n        \
+                           let x = match 1 {\n            \
+                               0 => { 0 }\n            \
+                               _ => { let y = || { 1 }; y() }\n        \
+                           };\n        \
+                           let _ = x;\n    \
+                       }\n\
+                   }\n\
+                   fn after() {}\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        let (s, e) = blocks[0];
+        assert_eq!(s, 1);
+        assert_eq!(e, 10, "must close at outer mod brace, not earlier");
+    }
+
+    #[test]
+    fn cfg_test_block_real_index_mod_file() {
+        // Cross-check against the real `src/index/mod.rs`: every test
+        // function declared inside a `#[cfg(test)]` module must fall
+        // inside one of the detected ranges. Line numbers are looked up
+        // dynamically so the test is resilient to refactors that move
+        // code around.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("src").join("index").join("mod.rs");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let blocks = find_cfg_test_blocks(&text);
+        assert!(
+            !blocks.is_empty(),
+            "expected at least one #[cfg(test)] block in index/mod.rs"
+        );
+        // Pick a few well-known test fns that have lived in the test mod
+        // since the original SEC005 false-positive report.
+        for name in [
+            "test_resolve_import_parent_dir",
+            "test_resolve_import_js_to_ts",
+        ] {
+            let line = lookup_fn_line(&text, name)
+                .unwrap_or_else(|| panic!("{name} not found in index/mod.rs"));
+            assert!(
+                blocks.iter().any(|(s, e)| line >= *s && line <= *e),
+                "{name} (line {line}) not covered by any block; got {blocks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cfg_test_block_real_server_mod_file() {
+        // Cross-check against the real `src/server/mod.rs`. It carries
+        // two #[cfg(test)] modules; verify all four functions that
+        // originally produced the SEC005 false positives are filtered.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest.join("src").join("server").join("mod.rs");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let blocks = find_cfg_test_blocks(&text);
+        assert!(
+            blocks.len() >= 2,
+            "expected at least 2 #[cfg(test)] blocks in server/mod.rs, got {blocks:?}"
+        );
+        for name in [
+            "rejects_traversal_beyond_root",
+            "rejects_sneaky_traversal",
+            "allows_internal_parent_within_root",
+            "rejects_single_parent_dir",
+        ] {
+            let line = lookup_fn_line(&text, name)
+                .unwrap_or_else(|| panic!("{name} not found in server/mod.rs"));
+            assert!(
+                blocks.iter().any(|(s, e)| line >= *s && line <= *e),
+                "{name} (line {line}) not covered by any block; got {blocks:?}"
+            );
+        }
+    }
+
+    /// Return the 1-based line number of `fn <name>` in `source`, or
+    /// `None` if the function is missing.
+    fn lookup_fn_line(source: &str, name: &str) -> Option<u32> {
+        let needle = format!("fn {name}");
+        source
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains(&needle))
+            .map(|(i, _)| (i + 1) as u32)
+    }
+
+    #[test]
+    fn cfg_test_block_does_not_eat_post_block_code() {
+        // Ensure that real production code AFTER a test block is NOT
+        // included in the block range, because that would mask real
+        // vulnerabilities.
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n    \
+                       fn t() { let _ = \"../safe-in-test\"; }\n\
+                   }\n\
+                   \n\
+                   pub fn risky() {\n    \
+                       let p = \"../etc/passwd\";\n\
+                   }\n";
+        let blocks = find_cfg_test_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        let (s, e) = blocks[0];
+        // `pub fn risky` lives at line 6; range must not include it.
+        assert!(s == 1 && e == 4, "block must end at line 4, got {blocks:?}");
+        let in_block = |line: u32| blocks.iter().any(|(a, b)| line >= *a && line <= *b);
+        assert!(!in_block(6), "production fn risky must not be in any block");
+        assert!(
+            !in_block(7),
+            "production code line must not be in any block"
+        );
     }
 }

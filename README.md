@@ -11,17 +11,22 @@
   <p align="center">
     <a href="#quickstart">Quickstart</a> ·
     <a href="#the-30-tools">30 Tools</a> ·
+    <a href="#modification-guard">Guard</a> ·
     <a href="#benchmarks">Benchmarks</a> ·
     <a href="#comparison-with-alternatives">Comparison</a> ·
     <a href="#supported-languages">37 Languages</a> ·
-    <a href="#contributing">Contributing</a>
+    <a href="#command-line-options">CLI</a> ·
+    <a href="#contributing">Contributing</a> ·
+    <a href="#security">Security</a> ·
+    <a href="CHANGELOG.md">Changelog</a>
   </p>
   <p align="center">
-    <img alt="License" src="https://img.shields.io/badge/license-dual-blue.svg">
-    <img alt="Rust" src="https://img.shields.io/badge/rust-2024-orange.svg">
+    <a href="https://crates.io/crates/qartez-mcp"><img alt="crates.io" src="https://img.shields.io/crates/v/qartez-mcp.svg?logo=rust"></a>
+    <a href="https://crates.io/crates/qartez-mcp"><img alt="downloads" src="https://img.shields.io/crates/d/qartez-mcp.svg"></a>
+    <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-dual-blue.svg"></a>
+    <img alt="MSRV 1.88" src="https://img.shields.io/badge/MSRV-1.88-orange.svg">
     <img alt="37 languages" src="https://img.shields.io/badge/languages-37-green.svg">
     <img alt="30 MCP tools" src="https://img.shields.io/badge/MCP_tools-30-purple.svg">
-    <img alt="Agent-native" src="https://img.shields.io/badge/agent--native-yes-ff69b4.svg">
   </p>
 </p>
 
@@ -49,17 +54,24 @@ The fix isn't a smarter model. It's a smarter index.
 
 ## Quickstart
 
-**Prerequisites:** macOS or Linux (Windows via [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install)). Rust toolchain is installed automatically if missing.
+**Platform support:** macOS 13+, Ubuntu 22.04+ (and other modern Linux), Windows via [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install). Architectures: x86_64 and arm64. Rust MSRV is **1.88** - the installer fetches it via [rustup](https://rustup.rs/) if missing.
 
-One command to install:
+### Install (recommended)
 
 ```bash
 curl -sSfL https://qartez.dev/install | sh
 ```
 
-The installer checks for Rust (installs via [rustup](https://rustup.rs/) if missing), builds the release binaries, installs them to `~/.local/bin/`, and launches `qartez-setup` in non-interactive mode - it auto-detects every MCP-capable IDE on your machine and configures them all in one pass, including the modification-guard hooks for Claude Code.
+The installer checks for Rust, builds the three release binaries (`qartez`, `qartez-guard`, `qartez-setup`), installs them to `~/.local/bin/`, and launches `qartez-setup` in non-interactive mode. The setup wizard auto-detects every MCP-capable IDE on your machine and configures them all in one pass, including the modification-guard hooks for Claude Code.
 
 Open any project in your IDE - Qartez indexes it automatically on session start. No manual step needed. The file watcher keeps the index fresh as you edit.
+
+### Install via Cargo
+
+```bash
+cargo install qartez-mcp
+qartez-setup        # then run the IDE wizard manually
+```
 
 <details>
 <summary>Alternative: install from source</summary>
@@ -69,6 +81,8 @@ git clone https://github.com/kuberstar/qartez-mcp.git
 cd qartez-mcp
 make deploy
 ```
+
+Want to inspect the install script before piping it into `sh`? Read it on GitHub: [`install.sh`](install.sh).
 </details>
 
 <details>
@@ -209,7 +223,7 @@ Tools are organized into **tiers** with progressive disclosure. Core tools are a
 | `qartez_unused` | Dead-code finder: exported symbols with zero importers, pre-materialized at index time. |
 | `qartez_diff_impact` | **Batch impact for a git diff range.** Pass a revspec like `main..HEAD` to get changed files with PageRank, union blast radius, convergence points, and co-change omissions. One call replaces N calls to `qartez_impact` + `qartez_cochange`. |
 | `qartez_hotspots` | **The refactor radar.** Ranks files and functions by hotspot score = **cyclomatic complexity x PageRank x (1 + churn)**. Points straight at the highest-risk code in the repo. |
-| `qartez_clones` | Structural code-clone detection via AST shape hashing (normalized past identifiers, literals, and comments). Finds duplicate logic the human reviewer would never spot. |
+| `qartez_clones` | Structural code-clone detection via AST shape hashing (identifiers, literals, and comments are normalized away). Finds duplicate logic the human reviewer would never spot. |
 | `qartez_boundaries` | Architecture-boundary enforcement. Declare "these modules may not import those" in `.qartez/boundaries.toml` and get every violating edge back. `suggest=true` seeds a starter config from the Leiden clustering. |
 | `qartez_hierarchy` | Type hierarchy queries: find all types implementing a trait/interface, or all traits/interfaces a type implements. Works across Rust, TypeScript, Java, Python, and Go. |
 | `qartez_trend` | Complexity trend over git history: tracks how a function's cyclomatic complexity evolved commit by commit. Flags functions that are GROWING, STABLE, or SHRINKING. |
@@ -281,12 +295,12 @@ Not claims. Measured. Reproducible. Run `make bench` and verify yourself.
 
 ### Headline
 
-**Aggregate token savings vs `Glob + Grep + Read + git log`: +94.5%**
-(sum of MCP 6,960 / sum of non-MCP 127,588 tokens across 18 complete scenarios on the Qartez self-bench.)
+**Aggregate token savings vs `Glob + Grep + Read + git log`: +91.8%**
+(sum of MCP 38,789 / sum of non-MCP 472,109 tokens across all **28 scenarios** on the Qartez self-bench. Conservative under-count: 10 of 28 scenarios have an incomplete non-MCP sim - those rows still contribute their MCP tokens to both sums. On the 18 scenarios with a fair token-to-token comparison the saving rises to **+94.5%**.)
 
 **LLM-judge quality (claude-opus-4-6):** **MCP 8.3 / 10** vs non-MCP **4.3 / 10** across five axes (correctness, completeness, usability, groundedness, conciseness), n=28.
 
-**Session cost context.** A typical Claude Code session starts at ~20,000 tokens of prompt overhead. A single `make bench` run saves ~120,000 tokens - **6 empty sessions** worth of budget bought back, just from routing questions through the right tool.
+**Session cost context.** A typical Claude Code session starts at ~20,000 tokens of prompt overhead. A single `make bench` run saves ~433,000 tokens - **~21 empty sessions** worth of budget bought back, just from routing questions through the right tool.
 
 ### Per-tool breakdown (Rust self-bench)
 
@@ -412,10 +426,10 @@ One binary. No per-language setup. All 37 languages parsed by tree-sitter (with 
 | Nginx | `.conf`, `.nginx` - `server`, `location`, `upstream` blocks |
 | Helm / Go templates | `.tpl` - `define`/`include`/`template` blocks |
 | Jenkinsfile / Groovy | `Jenkinsfile`, `.groovy` - `pipeline`, `stage`, `node`, `def` |
-| Starlark / Bazel | `BUILD`, `WORKSPACE`, `.bzl` - `load`, rules with `name=`, `def` |
+| Starlark / Bazel | `BUILD`, `BUILD.bazel`, `WORKSPACE`, `WORKSPACE.bazel`, `.bzl`, `.star`, `.bazel` - `load`, rules with `name=`, `def` |
 | Jsonnet | `.jsonnet` `.libsonnet` - `local` functions/vars, fields, `import`/`importstr` |
 | Caddyfile | `Caddyfile`, `.caddyfile` - site blocks, `handle`, `reverse_proxy`, snippets |
-| Systemd units | `.service` `.timer` `.socket` `.mount` `.target` - sections, `ExecStart`, directives |
+| Systemd units | `.service` `.timer` `.socket` `.mount` `.target` `.path` `.slice` `.scope` - sections, `ExecStart`, directives |
 
 </details>
 
@@ -552,7 +566,7 @@ Qartez also works as a standalone CLI. Run `qartez <tool_name>` (e.g., `qartez m
 | `--wiki <path>` | Generate architecture wiki after indexing | Off |
 | `--leiden-resolution <f>` | Cluster granularity (larger = more clusters) | `1.0` |
 | `--format <format>` | Output format for CLI subcommands: `human`, `json`, `compact` | `human` |
-| `--log-level <level>` | `error`, `warn`, `info`, `debug` | `info` |
+| `--log-level <level>` | `error`, `warn`, `info`, `debug`, `trace` (any `tracing` directive accepted) | `info` |
 
 ---
 
@@ -563,7 +577,7 @@ Qartez also works as a standalone CLI. Run `qartez <tool_name>` (e.g., `qartez m
 src/
   main.rs                  Entry point: index, compute, start server
   lib.rs                   Library root (re-exports)
-  cli.rs                   CLI argument parsing (20 subcommands)
+  cli.rs                   CLI argument parsing (19 subcommands)
   cli_runner.rs            CLI subcommand dispatcher
   config.rs                Project configuration and root detection
   error.rs                 Error types
@@ -573,7 +587,8 @@ src/
   guard.rs                 Modification guard evaluation engine
   embeddings.rs            Local embedding model for qartez_semantic (opt-in)
   server/
-    mod.rs                 MCP server - all 30 tool handlers
+    mod.rs                 MCP server entrypoint - dispatches to per-tool handlers
+    tools/                 30 per-tool handler modules (one file per MCP tool)
     prompts.rs             5 workflow prompt templates
     tiers.rs               Progressive tool disclosure (core/analysis/refactor/meta)
     cache.rs               Tree-sitter parse cache
@@ -581,6 +596,7 @@ src/
     overview.rs            Overview/map generation
     params.rs              Tool parameter structs
     treesitter.rs          Tree-sitter integration helpers
+    mcp_instructions.md    Embedded MCP server instructions
   index/
     mod.rs                 Core indexing engine (full + incremental, import resolution)
     walker.rs              File discovery (respects .gitignore + .qartezignore)
@@ -611,8 +627,14 @@ src/
     guard.rs               PreToolUse modification guard
     benchmark.rs           Benchmark harness entry point
   benchmark/               Benchmark internals (cargo feature)
+    profiles/              Per-language benchmark profiles (Rust, TS, Python, Go, Java)
+    scenarios.rs           28 benchmark scenarios
+    judge.rs               LLM-judge harness
+    report.rs              Markdown / JSON report writers
+    tokenize.rs            cl100k_base token accounting
 scripts/                   Hook + snippet assets embedded by qartez-setup
 benchmarks/fixtures.toml   Pinned OSS repos for multi-language benchmarks
+reports/                   Generated benchmark.md / benchmark.json artifacts
 ```
 
 </details>
@@ -621,7 +643,7 @@ benchmarks/fixtures.toml   Pinned OSS repos for multi-language benchmarks
 
 ## Contributing
 
-Found a bug? Open an [issue](https://github.com/kuberstar/qartez-mcp/issues). Want to add a language, fix a parser, or improve a tool? Pull requests are welcome.
+Found a bug? Open an [issue](https://github.com/kuberstar/qartez-mcp/issues). Want to add a language, fix a parser, or improve a tool? Pull requests are welcome - read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) first. Non-trivial PRs require signing the [`CLA.md`](CLA.md).
 
 ```bash
 git clone https://github.com/kuberstar/qartez-mcp.git
@@ -630,16 +652,23 @@ cargo build
 cargo test
 ```
 
+Release notes for every version live in [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
+## Security
+
+Found a vulnerability? **Do not open a public issue.** Follow the disclosure policy in [`SECURITY.md`](SECURITY.md).
+
 ---
 
 ## License
 
-Free for individuals, commercial license for businesses - see [`LICENSE`](LICENSE).
+Dual-licensed under the **Qartez Small Team License** (free for individuals and small teams) and the **Qartez Commercial License** (for everyone else). Read the full text in [`LICENSE`](LICENSE), and see [`COMMERCIAL.md`](COMMERCIAL.md) for the commercial terms summary. SPDX identifier: `LicenseRef-Qartez-Dual`.
 
 ---
 
 <p align="center">
-  <strong>Grep was for humans. Qartez is for agents.</strong><br>
-  <code>make deploy</code> - and give your assistant the senses it was missing.<br><br>
+  <strong>Grep was for humans. Qartez is for agents.</strong><br><br>
   If Qartez saves you even 10% of your monthly AI bill, <a href="https://github.com/kuberstar/qartez-mcp">star the repo</a> - it's the only signal that tells other builders this approach is worth trying.
 </p>

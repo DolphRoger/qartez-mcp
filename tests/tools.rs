@@ -752,7 +752,7 @@ fn make_commit(repo: &git2::Repository, dir: &Path, files: &[&str], message: &st
             fs::create_dir_all(parent).unwrap();
         }
         let existing = fs::read_to_string(&file_path).unwrap_or_default();
-        fs::write(&file_path, format!("{}\n// edit", existing)).unwrap();
+        fs::write(&file_path, format!("{existing}\n// edit")).unwrap();
         index.add_path(Path::new(file)).unwrap();
     }
 
@@ -1784,6 +1784,265 @@ fn test_security_scan_severity_filter() {
     );
 }
 
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_skips_inline_cfg_test_modules() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    // `prod_path` is a real SEC005 hit; `test_resolve_traversal` lives
+    // inside `#[cfg(test)] mod tests {}` and must not surface as a
+    // finding when include_tests is left at its default of false.
+    fs::write(
+        src.join("lib.rs"),
+        "pub fn prod_path() {\n    \
+             let p = \"../etc/passwd\";\n    \
+             let _ = std::fs::read(p);\n\
+         }\n\
+         \n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             #[test]\n    \
+             fn test_resolve_traversal() {\n        \
+                 let p = \"../../../sneaky\";\n        \
+                 assert!(p.contains(\"..\"));\n    \
+             }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name("qartez_security", json!({"category": "injection"}))
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("prod_path"),
+        "production SEC005 must surface, got: {result}"
+    );
+    // Symbol names get truncated in the rendered table, so the negative
+    // assertion has to look at the snippet text, which is verbatim and
+    // unique to the inline test fixture.
+    assert!(
+        !result.contains("../../../sneaky"),
+        "inline #[cfg(test)] symbol must be skipped, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_include_tests_surfaces_inline_test_symbols() {
+    // When include_tests=true, the cfg(test) filter must be a no-op:
+    // both production and inline-test SEC005 hits must appear.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("lib.rs"),
+        "pub fn prod_path() {\n    let p = \"../etc/passwd\";\n    let _ = std::fs::read(p);\n}\n\
+         \n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             #[test]\n    \
+             fn test_resolve_traversal() {\n        \
+                 let p = \"../../../sneaky\";\n        \
+                 assert!(p.contains(\"..\"));\n    \
+             }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name(
+            "qartez_security",
+            json!({"category": "injection", "include_tests": true}),
+        )
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("prod_path"),
+        "production SEC005 must surface with include_tests=true, got: {result}"
+    );
+    // Symbol names are truncated in the table; check the snippet text
+    // unique to the inline test fixture.
+    assert!(
+        result.contains("../../../sneaky"),
+        "inline test SEC005 must surface with include_tests=true, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_preserves_findings_outside_test_block() {
+    // SEC005 violations BEFORE and AFTER an inline #[cfg(test)] mod must
+    // both surface; only the inline test fixture should be filtered.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("lib.rs"),
+        "pub fn before_block() {\n    let _ = \"../before/path\";\n}\n\
+         \n\
+         #[cfg(test)]\n\
+         mod tests {\n    \
+             #[test]\n    \
+             fn inside_test() {\n        \
+                 let _ = \"../../inside/test\";\n    \
+             }\n\
+         }\n\
+         \n\
+         pub fn after_block() {\n    let _ = \"../after/path\";\n}\n",
+    )
+    .unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name("qartez_security", json!({"category": "injection"}))
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("before_block"),
+        "SEC005 before test mod must surface, got: {result}"
+    );
+    assert!(
+        result.contains("after_block"),
+        "SEC005 after test mod must surface, got: {result}"
+    );
+    // Snippet text is the most reliable check (symbol names can be
+    // truncated in the rendered table).
+    assert!(
+        result.contains("../before/path"),
+        "SEC005 snippet before test mod must appear, got: {result}"
+    );
+    assert!(
+        result.contains("../after/path"),
+        "SEC005 snippet after test mod must appear, got: {result}"
+    );
+    assert!(
+        !result.contains("../../inside/test"),
+        "SEC005 snippet inside test mod must be filtered, got: {result}"
+    );
+}
+
+#[test]
+fn test_security_scan_sec007_allowlist_end_to_end() {
+    // End-to-end test for SEC007 allowlist behaviour. The scanner must:
+    // - skip `xmlns="http://www.w3.org/2000/svg"` inside CSS data-URIs,
+    // - skip `proxy_pass http://backend` (single-label internal host),
+    // - still flag real public plaintext URLs.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    // Public external URL — must be flagged.
+    fs::write(
+        src.join("real_external.rs"),
+        "pub fn leak_plaintext() {\n    \
+         let api = \"http://api.vendor.io/v1/metrics\";\n    \
+         let _ = api;\n\
+         }\n",
+    )
+    .unwrap();
+
+    // xmlns SVG namespace in data-URI — must NOT be flagged.
+    fs::write(
+        src.join("svg_css.rs"),
+        "pub fn svg_bg() -> &'static str {\n    \
+         \"background: url(\\\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>\\\")\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    // nginx-style internal upstream — must NOT be flagged.
+    fs::write(
+        src.join("nginx_conf.rs"),
+        "pub fn nginx_snippet() -> &'static str {\n    \
+         \"location / {\\n    proxy_pass http://backend;\\n}\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    // xmlns SOAP namespace (generic xmlns context, not w3.org) — must NOT be flagged.
+    fs::write(
+        src.join("soap_envelope.rs"),
+        "pub fn soap_envelope() -> &'static str {\n    \
+         \"<env:Envelope xmlns:env=\\\"http://schemas.xmlsoap.org/soap/envelope/\\\"/>\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    // Localhost — must NOT be flagged (pre-existing allowlist behaviour).
+    fs::write(
+        src.join("local_dev.rs"),
+        "pub fn dev_url() -> &'static str {\n    \
+         \"http://localhost:8080/health\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name(
+            "qartez_security",
+            json!({ "category": "crypto", "min_severity": "low" }),
+        )
+        .expect("qartez_security dispatch");
+
+    // Real public URL must surface.
+    assert!(
+        result.contains("real_external.rs"),
+        "expected real external URL to be flagged, got: {result}"
+    );
+
+    // None of the four benign cases should appear as findings.
+    for benign in [
+        "svg_css.rs",
+        "nginx_conf.rs",
+        "soap_envelope.rs",
+        "local_dev.rs",
+    ] {
+        assert!(
+            !result.contains(benign),
+            "SEC007 false positive in {benign}, got: {result}"
+        );
+    }
+
+    // Sanity-check on the specific allowlisted URL strings.
+    assert!(
+        !result.contains("http://www.w3.org"),
+        "w3.org namespace must not appear in findings: {result}"
+    );
+    assert!(
+        !result.contains("http://backend"),
+        "single-label host must not appear in findings: {result}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // qartez_smells: end-to-end integration tests
 // ---------------------------------------------------------------------------
@@ -2586,6 +2845,187 @@ fn test_gaps_all_files_covered() {
     assert!(
         result.contains("No untested source files"),
         "all covered - should show no gaps, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_gaps_inline_cfg_test_not_flagged_as_gap() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    // Write a real Rust file with an inline `#[cfg(test)]` module to the temp
+    // project root. No external test file imports it, but its inline tests
+    // should still mark it as covered.
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/inlined.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\
+         #[cfg(test)]\n\
+         mod tests {\n\
+             use super::*;\n\
+             #[test]\n\
+             fn it_works() { assert_eq!(add(2, 2), 4); }\n\
+         }\n",
+    )
+    .unwrap();
+
+    insert_file(&conn, "src/inlined.rs");
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+
+    let result = server
+        .call_tool_by_name("qartez_test_gaps", json!({"mode": "gaps"}))
+        .expect("should succeed");
+    assert!(
+        result.contains("No untested source files"),
+        "file with inline `#[cfg(test)]` mod must not be flagged as gap, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_gaps_inline_test_attr_only_not_flagged() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    // File uses bare `#[test]` without a `#[cfg(test)]` wrapper (legal but rare).
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/bare.rs"),
+        "pub fn id(x: i32) -> i32 { x }\n\
+         #[test]\n\
+         fn check() { assert_eq!(id(1), 1); }\n",
+    )
+    .unwrap();
+
+    insert_file(&conn, "src/bare.rs");
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+
+    let result = server
+        .call_tool_by_name("qartez_test_gaps", json!({"mode": "gaps"}))
+        .expect("should succeed");
+    assert!(
+        result.contains("No untested source files"),
+        "bare `#[test]` must mark file as covered, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_gaps_tokio_test_attr_not_flagged() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/async_file.rs"),
+        "pub async fn work() -> u32 { 42 }\n\
+         #[tokio::test]\n\
+         async fn check() { assert_eq!(work().await, 42); }\n",
+    )
+    .unwrap();
+
+    insert_file(&conn, "src/async_file.rs");
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+
+    let result = server
+        .call_tool_by_name("qartez_test_gaps", json!({"mode": "gaps"}))
+        .expect("should succeed");
+    assert!(
+        result.contains("No untested source files"),
+        "`#[tokio::test]` must mark file as covered, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_gaps_missing_source_file_still_flagged() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    // File row is indexed but no physical file on disk - read_to_string fails,
+    // helper returns false, file should remain flagged (no silent masking).
+    insert_file(&conn, "src/phantom.rs");
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+
+    let result = server
+        .call_tool_by_name("qartez_test_gaps", json!({"mode": "gaps"}))
+        .expect("should succeed");
+    assert!(
+        result.contains("src/phantom.rs"),
+        "missing file on disk must still be flagged, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_gaps_non_rust_file_with_test_in_name_still_flagged() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    // A Python file (not in a `tests/` directory) - helper must short-circuit
+    // on extension, so this gets flagged regardless of contents.
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/script.py"),
+        "# [test] not a rust attr\n#[cfg(test)] also ignored\n",
+    )
+    .unwrap();
+
+    insert_file(&conn, "src/script.py");
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+
+    let result = server
+        .call_tool_by_name("qartez_test_gaps", json!({"mode": "gaps"}))
+        .expect("should succeed");
+    assert!(
+        result.contains("src/script.py"),
+        "non-Rust file with test-looking text must still be flagged, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_gaps_file_without_inline_tests_still_flagged() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/plain.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+
+    insert_file(&conn, "src/plain.rs");
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+
+    let result = server
+        .call_tool_by_name("qartez_test_gaps", json!({"mode": "gaps"}))
+        .expect("should succeed");
+    assert!(
+        result.contains("src/plain.rs"),
+        "file without any tests must still be flagged as gap, got: {result}"
     );
 }
 

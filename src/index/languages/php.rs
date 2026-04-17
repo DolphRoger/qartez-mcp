@@ -1,6 +1,7 @@
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::{self, children, node_text};
 use crate::index::symbols::{
     ExtractedImport, ExtractedReference, ExtractedSymbol, ParseResult, ReferenceKind, SymbolKind,
 };
@@ -40,10 +41,6 @@ impl LanguageSupport for PhpSupport {
             ..Default::default()
         }
     }
-}
-
-fn children(node: Node) -> impl Iterator<Item = Node> {
-    (0..node.child_count() as u32).filter_map(move |i| node.child(i))
 }
 
 fn has_visibility(node: Node, source: &[u8], modifier: &str) -> bool {
@@ -535,7 +532,7 @@ fn extract_require_include(node: Node, source: &[u8]) -> Option<ExtractedImport>
         return None;
     };
 
-    let path = unquote(path);
+    let path = common::unquote(path);
     if path.is_empty() {
         return None;
     }
@@ -547,42 +544,8 @@ fn extract_require_include(node: Node, source: &[u8]) -> Option<ExtractedImport>
     })
 }
 
-fn unquote(s: &str) -> String {
-    let trimmed = s.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    let text = std::str::from_utf8(&source[start..end]).ok()?;
-
-    let sig = if let Some(brace_pos) = text.find('{') {
-        text[..brace_pos].trim()
-    } else {
-        text.lines().next().unwrap_or(text).trim()
-    };
-
-    if sig.is_empty() {
-        return None;
-    }
-
-    let truncated = if sig.len() > 200 { &sig[..200] } else { sig };
-    Some(truncated.to_string())
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
+    common::brace_or_first_line_signature(node, source)
 }
 
 #[cfg(test)]

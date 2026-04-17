@@ -1,11 +1,11 @@
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::{self, children, node_text};
 use crate::index::symbols::{
     ExtractedImport, ExtractedReference, ExtractedRelation, ExtractedSymbol, ParseResult,
     ReferenceKind, RelationKind, SymbolKind,
 };
-use crate::str_utils::floor_char_boundary;
 
 pub struct TypeScriptSupport;
 
@@ -47,10 +47,6 @@ impl LanguageSupport for TypeScriptSupport {
             type_relations,
         }
     }
-}
-
-fn children(node: Node) -> impl Iterator<Item = Node> {
-    (0..node.child_count() as u32).filter_map(move |i| node.child(i))
 }
 
 fn extract_type_relations(node: Node, source: &[u8]) -> Vec<ExtractedRelation> {
@@ -354,7 +350,7 @@ fn extract_export_statement(
 
     for child in children(node) {
         if child.kind() == "string" {
-            source_str = unquote(node_text(child, source));
+            source_str = common::unquote(&node_text(child, source));
             has_source = true;
         }
     }
@@ -660,7 +656,7 @@ fn extract_variable_decl(node: Node, source: &[u8], symbols: &mut Vec<ExtractedS
 fn extract_import(node: Node, source: &[u8]) -> Option<ExtractedImport> {
     let source_node = node.child_by_field_name("source")?;
     let raw = node_text(source_node, source);
-    let specifier = unquote(raw);
+    let specifier = common::unquote(&raw);
     if specifier.is_empty() {
         return None;
     }
@@ -728,45 +724,7 @@ fn collect_export_specifiers(node: Node, source: &[u8], specifiers: &mut Vec<Str
 }
 
 fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    let text = std::str::from_utf8(&source[start..end]).ok()?;
-
-    let sig = if let Some(brace_pos) = text.find('{') {
-        text[..brace_pos].trim()
-    } else {
-        text.lines().next().unwrap_or(text).trim()
-    };
-
-    if sig.is_empty() {
-        return None;
-    }
-
-    let truncated = if sig.len() > 200 {
-        &sig[..floor_char_boundary(sig, 200)]
-    } else {
-        sig
-    };
-    Some(truncated.to_string())
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
-}
-
-fn unquote(s: String) -> String {
-    let trimmed = s.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
+    common::brace_or_first_line_signature(node, source)
 }
 
 #[cfg(test)]

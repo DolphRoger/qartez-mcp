@@ -53,11 +53,11 @@ const MOVE_DEST_BASENAME: &str = "helpers_benchmark_tmp";
 ///
 /// Must stay in lockstep with [`crate::index::symbols::SymbolKind::as_str`]
 /// - kinds are stored as lowercase strings in the database, so comparing
-/// against `"Function"` (capital F) silently matches zero rows. The
-/// bug used to be hidden by the Rust profile's `target_override`, which
-/// bypassed this resolver entirely; it surfaced on the Python fixture
-/// as a -1766% `qartez_read` regression and inspired these named
-/// constants to prevent the same pitfall from creeping back in.
+///   against `"Function"` (capital F) silently matches zero rows. The
+///   bug used to be hidden by the Rust profile's `target_override`, which
+///   bypassed this resolver entirely; it surfaced on the Python fixture
+///   as a -1766% `qartez_read` regression and inspired these named
+///   constants to prevent the same pitfall from creeping back in.
 ///
 /// Java and Kotlin index body-carrying class members as
 /// [`crate::index::symbols::SymbolKind::Method`], so [`CALLABLE_KINDS`]
@@ -507,4 +507,77 @@ fn path_to_import_stem(path: &str) -> String {
     stem.strip_suffix("::mod")
         .map(str::to_string)
         .unwrap_or(stem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_callable_kind_accepts_function_and_method() {
+        assert!(is_callable_kind("function"));
+        assert!(is_callable_kind("method"));
+    }
+
+    #[test]
+    fn is_callable_kind_rejects_non_callable_kinds() {
+        assert!(!is_callable_kind("struct"));
+        assert!(!is_callable_kind("class"));
+        assert!(!is_callable_kind(""));
+        assert!(!is_callable_kind("Function"));
+    }
+
+    #[test]
+    fn parent_dir_returns_prefix_before_last_slash() {
+        assert_eq!(parent_dir("src/storage/read.rs"), "src/storage");
+        assert_eq!(parent_dir("a/b"), "a");
+    }
+
+    #[test]
+    fn parent_dir_is_empty_when_no_slash() {
+        assert_eq!(parent_dir(""), "");
+        assert_eq!(parent_dir("Cargo.toml"), "");
+    }
+
+    #[test]
+    fn renamed_destination_appends_suffix_before_extension() {
+        assert_eq!(
+            renamed_destination("src/server/helpers.rs"),
+            "src/server/helpers_renamed.rs"
+        );
+    }
+
+    #[test]
+    fn renamed_destination_handles_extensionless_and_bare_files() {
+        assert_eq!(renamed_destination("Dockerfile"), "Dockerfile_renamed");
+        assert_eq!(renamed_destination("a/b/Makefile"), "a/b/Makefile_renamed");
+        assert_eq!(renamed_destination("foo.rs"), "foo_renamed.rs");
+    }
+
+    #[test]
+    fn path_to_import_stem_strips_src_and_extension() {
+        assert_eq!(path_to_import_stem("src/storage/read.rs"), "storage::read");
+    }
+
+    #[test]
+    fn path_to_import_stem_strips_trailing_mod() {
+        assert_eq!(path_to_import_stem("src/server/mod.rs"), "server");
+        assert_eq!(
+            path_to_import_stem("src/benchmark/profiles/mod.rs"),
+            "benchmark::profiles"
+        );
+    }
+
+    #[test]
+    fn path_to_import_stem_without_src_prefix() {
+        assert_eq!(
+            path_to_import_stem("vendor/lib/util.rs"),
+            "vendor::lib::util"
+        );
+    }
+
+    #[test]
+    fn path_to_import_stem_without_extension_keeps_path() {
+        assert_eq!(path_to_import_stem("src/foo/bar"), "foo::bar");
+    }
 }

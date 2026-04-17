@@ -93,3 +93,56 @@ pub fn implemented_languages() -> Vec<&'static str> {
         .filter(|n| by_name(n).is_some())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn by_name_resolves_rust_with_expected_fields() {
+        let profile = by_name("rust").expect("rust profile must resolve");
+        assert_eq!(profile.name, "rust");
+        assert!(profile.extensions.contains(&"rs"));
+        assert_eq!(profile.project_file, "Cargo.toml");
+        assert!(
+            profile.target_override.is_some(),
+            "rust profile must provide a deterministic target override"
+        );
+    }
+
+    #[test]
+    fn by_name_returns_none_for_unknown_and_empty() {
+        assert!(by_name("").is_none());
+        assert!(by_name("cobol").is_none());
+        assert!(by_name("RUST").is_none(), "lookup must be case sensitive");
+    }
+
+    #[test]
+    #[allow(clippy::const_is_empty)]
+    fn known_languages_is_nonempty_and_contains_rust() {
+        assert!(!KNOWN_LANGUAGES.is_empty());
+        assert!(KNOWN_LANGUAGES.contains(&"rust"));
+    }
+
+    #[test]
+    fn implemented_languages_is_a_subset_of_known_languages() {
+        let implemented = implemented_languages();
+        assert!(implemented.contains(&"rust"));
+        for name in &implemented {
+            assert!(
+                KNOWN_LANGUAGES.contains(name),
+                "implemented language {name} missing from KNOWN_LANGUAGES"
+            );
+        }
+    }
+
+    #[test]
+    fn implemented_languages_matches_by_name_dispatch() {
+        for name in implemented_languages() {
+            assert!(
+                by_name(name).is_some(),
+                "implemented_languages reported {name} but by_name returned None"
+            );
+        }
+    }
+}

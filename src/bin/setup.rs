@@ -1,4 +1,4 @@
-// Rust guideline compliant 2026-04-15
+// Rust guideline compliant 2026-04-16
 //! `qartez-setup` - interactive IDE auto-setup wizard.
 //!
 //! Detects installed IDEs, presents an interactive checkbox prompt, and
@@ -274,10 +274,11 @@ impl Ide {
         if !has_config {
             return false;
         }
-        // Config dir exists; verify the IDE is actually installed by checking
-        // for a CLI binary on PATH or a macOS .app bundle.
+        // Config dir exists; verify the IDE is actually installed by
+        // probing PATH plus the well-known install locations users tend
+        // to forget to source - or, on macOS, a known .app bundle.
         let bins = self.cli_binary_names();
-        if bins.iter().any(|name| which_in_path(name).is_some()) {
+        if bins.iter().any(|name| find_cli_anywhere(name).is_some()) {
             return true;
         }
         #[cfg(target_os = "macos")]
@@ -287,6 +288,12 @@ impl Ide {
             if apps.iter().any(|name| app_dir.join(name).is_dir()) {
                 return true;
             }
+        }
+        // Claude Code: the VS Code / Cursor extension bundles its own CLI,
+        // so its presence proves Claude Code is installed even when no
+        // top-level `claude` binary exists in any of the usual locations.
+        if matches!(self, Self::ClaudeCode) && has_claude_vscode_extension() {
+            return true;
         }
         // VS Code extensions (Cline, RooCode, Continue, Augment): if the
         // config dir exists the extension is installed, no separate binary.
@@ -415,7 +422,7 @@ fn discover_prefixed_dirs(prefix: &str) -> Vec<PathBuf> {
         return dirs;
     };
 
-    let variant_prefix = format!("{}-", prefix);
+    let variant_prefix = format!("{prefix}-");
     let mut variants: Vec<PathBuf> = entries
         .filter_map(std::result::Result::ok)
         .filter_map(|entry| {
@@ -604,6 +611,74 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Search for a CLI binary on PATH plus the well-known install locations
+/// users typically forget to add to their shell profile.
+///
+/// `which_in_path` alone produces false negatives when an IDE's CLI was
+/// installed via `npm i -g`, the standalone `~/.local/bin` installer, or
+/// the legacy `~/.claude/local/claude` shim, but the user has not yet
+/// re-sourced `.bashrc` / `.zshrc`. Detection silently dropping those
+/// installs led to "No IDEs selected" runs of `qartez-setup`.
+fn find_cli_anywhere(name: &str) -> Option<PathBuf> {
+    if let Some(path) = which_in_path(name) {
+        return Some(path);
+    }
+
+    let home = home_dir();
+    let mut candidates: Vec<PathBuf> = vec![
+        home.join(".local").join("bin").join(name),
+        home.join(".npm-global").join("bin").join(name),
+        home.join(".bun").join("bin").join(name),
+        home.join(".cargo").join("bin").join(name),
+        PathBuf::from("/usr/local/bin").join(name),
+        PathBuf::from("/opt/homebrew/bin").join(name),
+    ];
+    if name == "claude" {
+        // Standalone `claude install` flow drops the binary here regardless
+        // of PATH, so it is the most common source of "claude works in the
+        // terminal but qartez-setup can't see it" reports.
+        candidates.push(home.join(".claude").join("local").join("claude"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Detect the official `anthropic.claude-code` VS Code extension across
+/// every editor variant that reuses VS Code's extension layout: VS Code,
+/// VS Code Insiders, Cursor, and the VS Code Remote-SSH server.
+///
+/// The extension bundles its own `claude` CLI under
+/// `<root>/extensions/anthropic.claude-code-<version>/`, so its presence
+/// is sufficient evidence that Claude Code is installed even when the
+/// user never put a top-level `claude` binary on PATH. Visual Studio
+/// (Microsoft IDE) wrappers like `dliedke.ClaudeCodeExtension` and
+/// `GlassBeaver.ClaudeVS` shell out to that same CLI, so they benefit
+/// from this signal too.
+fn has_claude_vscode_extension() -> bool {
+    let home = home_dir();
+    let extension_roots = [
+        home.join(".vscode").join("extensions"),
+        home.join(".vscode-insiders").join("extensions"),
+        home.join(".cursor").join("extensions"),
+        home.join(".vscode-server").join("extensions"),
+    ];
+
+    for root in &extension_roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("anthropic.claude-code-")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // -- Per-IDE install/uninstall -----------------------------------------------
 
 fn install_ide(ide: Ide, bin: &str, guard_bin: Option<&str>) -> anyhow::Result<()> {
@@ -778,10 +853,12 @@ fn install_claude_one(claude_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
     ensure_hook_entry(
         &mut settings,
         "PreToolUse",
-        "Glob|Grep",
-        "qartez-guard",
-        &guard_cmd,
-        3000,
+        HookEntry {
+            matcher: "Glob|Grep",
+            search_term: "qartez-guard",
+            command: &guard_cmd,
+            timeout: 3000,
+        },
     );
 
     // PreToolUse: Edit|Write|MultiEdit modification guard
@@ -789,10 +866,12 @@ fn install_claude_one(claude_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
         ensure_hook_entry(
             &mut settings,
             "PreToolUse",
-            "Edit|Write|MultiEdit",
-            "qartez-guard",
-            guard,
-            3000,
+            HookEntry {
+                matcher: "Edit|Write|MultiEdit",
+                search_term: "qartez-guard",
+                command: guard,
+                timeout: 3000,
+            },
         );
     } else {
         warn("qartez-guard binary not found; modification guard hook skipped");
@@ -841,14 +920,22 @@ fn install_claude_one(claude_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
     Ok(())
 }
 
-fn ensure_hook_entry(
-    settings: &mut serde_json::Value,
-    hook_type: &str,
-    matcher: &str,
-    search_term: &str,
-    command: &str,
+#[derive(Debug, Clone, Copy)]
+struct HookEntry<'a> {
+    matcher: &'a str,
+    search_term: &'a str,
+    command: &'a str,
     timeout: u64,
-) {
+}
+
+fn ensure_hook_entry(settings: &mut serde_json::Value, hook_type: &str, entry: HookEntry<'_>) {
+    let HookEntry {
+        matcher,
+        search_term,
+        command,
+        timeout,
+    } = entry;
+
     let hooks_arr = settings["hooks"][hook_type]
         .as_array()
         .cloned()
@@ -1025,10 +1112,12 @@ fn install_gemini_one(gemini_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
     ensure_hook_entry(
         &mut settings,
         "BeforeTool",
-        "glob|grep_search",
-        "qartez-guard",
-        &guard_cmd,
-        3000,
+        HookEntry {
+            matcher: "glob|grep_search",
+            search_term: "qartez-guard",
+            command: &guard_cmd,
+            timeout: 3000,
+        },
     );
 
     // BeforeTool: replace|write_file modification guard
@@ -1036,10 +1125,12 @@ fn install_gemini_one(gemini_dir: &Path, bin: &str, guard_bin: Option<&str>) -> 
         ensure_hook_entry(
             &mut settings,
             "BeforeTool",
-            "replace|write_file",
-            "qartez-guard",
-            guard,
-            3000,
+            HookEntry {
+                matcher: "replace|write_file",
+                search_term: "qartez-guard",
+                command: guard,
+                timeout: 3000,
+            },
         );
     }
 
@@ -1383,7 +1474,10 @@ fn install_global_gitignore() -> anyhow::Result<()> {
 }
 
 fn resolve_global_gitignore() -> PathBuf {
-    // Try git config --global core.excludesfile
+    // Try git config --global core.excludesfile.
+    // No injection surface: every argv entry is a string literal and the
+    // process is spawned directly (no shell). The captured stdout is
+    // treated as a path, never re-executed.
     if let Ok(output) = std::process::Command::new("git")
         .args(["config", "--global", "core.excludesfile"])
         .output()
@@ -2524,6 +2618,10 @@ fn download_semantic_model() -> anyhow::Result<()> {
         }
         let url = format!("{base_url}/{filename}");
         eprintln!("  {} Downloading {filename}...", style("[>]").cyan(),);
+        // No injection surface: base_url is a hardcoded literal, filename
+        // comes from the local hardcoded `files` table, and dest is a path
+        // under ~/.qartez/models. Each value is passed as a separate argv
+        // entry to curl - no shell, no word-splitting.
         let status = Command::new("curl")
             .args(["-fSL", "--progress-bar", "-o"])
             .arg(dest.as_os_str())
@@ -2625,6 +2723,9 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 
 fn fetch_latest_release_tag() -> anyhow::Result<String> {
     let url = format!("https://api.github.com/repos/{QARTEZ_UPDATE_REPO}/releases/latest");
+    // No injection surface: url is built from the compile-time constant
+    // QARTEZ_UPDATE_REPO and a literal path. curl is invoked with a fixed
+    // argv (no shell), so the URL cannot break out into another argument.
     let output = Command::new("curl")
         .args([
             "-sSfL",
@@ -2707,6 +2808,13 @@ fn run_update(background: bool) -> anyhow::Result<()> {
         latest.trim_start_matches('v'),
     );
 
+    // The `sh -c` form is the canonical install pattern documented in the
+    // README, but it is the only invocation in this file that goes through
+    // a shell parser. install_cmd is built solely from the compile-time
+    // constant QARTEZ_INSTALL_URL - no runtime input ever flows into the
+    // shell string. Changing QARTEZ_INSTALL_URL requires a code change and
+    // a rebuild, so there is no path for an attacker to alter what runs
+    // here without already controlling the binary.
     let install_cmd = format!("curl -sSfL {QARTEZ_INSTALL_URL} | sh");
     let mut child = Command::new("sh")
         .arg("-c")
@@ -3079,5 +3187,234 @@ mod tests {
         let orig = std::env::var("PATH").unwrap_or_default();
         let _path = EnvGuard::set("PATH", format!("{}:{orig}", tmp.path().display()));
         assert!(fetch_latest_release_tag().is_err());
+    }
+
+    // -- find_cli_anywhere / has_claude_vscode_extension -------------------
+
+    /// PATH is pointed at an empty tmp dir so `which_in_path` cannot find
+    /// anything; we then assert the home-dir fallback returns the binary.
+    #[test]
+    fn find_cli_anywhere_finds_binary_in_local_bin() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let empty_path = tmp.path().join("__empty_path_dir");
+        fs::create_dir_all(&empty_path).unwrap();
+        let _path = EnvGuard::set("PATH", &empty_path);
+
+        let local_bin = tmp.path().join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let bin_path = local_bin.join("claude");
+        fs::write(&bin_path, "").unwrap();
+
+        assert_eq!(find_cli_anywhere("claude"), Some(bin_path));
+    }
+
+    #[test]
+    fn find_cli_anywhere_returns_none_when_missing_everywhere() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let empty_path = tmp.path().join("__empty_path_dir");
+        fs::create_dir_all(&empty_path).unwrap();
+        let _path = EnvGuard::set("PATH", &empty_path);
+
+        assert!(find_cli_anywhere("definitely-not-installed-xyz").is_none());
+    }
+
+    /// `~/.claude/local/claude` is the fallback emitted by Anthropic's
+    /// standalone installer; only the literal `claude` name should hit it.
+    #[test]
+    fn find_cli_anywhere_falls_back_to_claude_local_for_claude() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let empty_path = tmp.path().join("__empty_path_dir");
+        fs::create_dir_all(&empty_path).unwrap();
+        let _path = EnvGuard::set("PATH", &empty_path);
+
+        let claude_local = tmp.path().join(".claude").join("local");
+        fs::create_dir_all(&claude_local).unwrap();
+        let bin_path = claude_local.join("claude");
+        fs::write(&bin_path, "").unwrap();
+
+        assert_eq!(find_cli_anywhere("claude"), Some(bin_path));
+    }
+
+    /// Probing a non-claude binary must not consult `~/.claude/local/`,
+    /// otherwise we would spuriously report e.g. `cursor` as installed.
+    #[test]
+    fn find_cli_anywhere_does_not_use_claude_local_for_other_bins() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let empty_path = tmp.path().join("__empty_path_dir");
+        fs::create_dir_all(&empty_path).unwrap();
+        let _path = EnvGuard::set("PATH", &empty_path);
+
+        let claude_local = tmp.path().join(".claude").join("local");
+        fs::create_dir_all(&claude_local).unwrap();
+        fs::write(claude_local.join("cursor"), "").unwrap();
+
+        assert!(find_cli_anywhere("cursor").is_none());
+    }
+
+    #[test]
+    fn has_claude_vscode_extension_detects_versioned_dir() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let ext_dir = tmp
+            .path()
+            .join(".vscode")
+            .join("extensions")
+            .join("anthropic.claude-code-1.2.3");
+        fs::create_dir_all(&ext_dir).unwrap();
+
+        assert!(has_claude_vscode_extension());
+    }
+
+    #[test]
+    fn has_claude_vscode_extension_detects_in_cursor() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let ext_dir = tmp
+            .path()
+            .join(".cursor")
+            .join("extensions")
+            .join("anthropic.claude-code-2.0.0-rc1");
+        fs::create_dir_all(&ext_dir).unwrap();
+
+        assert!(has_claude_vscode_extension());
+    }
+
+    #[test]
+    fn has_claude_vscode_extension_returns_false_when_absent() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        assert!(!has_claude_vscode_extension());
+    }
+
+    /// A different extension publisher must never match - the prefix has
+    /// to be exactly `anthropic.claude-code-` or we risk false positives
+    /// from third-party clones (e.g. `someone-else.claude-code-fork-1.0`).
+    #[test]
+    fn has_claude_vscode_extension_ignores_unrelated_extensions() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let ext_dir = tmp
+            .path()
+            .join(".vscode")
+            .join("extensions")
+            .join("ms-python.python-2026.1.0");
+        fs::create_dir_all(&ext_dir).unwrap();
+
+        assert!(!has_claude_vscode_extension());
+    }
+
+    #[test]
+    fn ensure_hook_entry_inserts_new_entry() {
+        let mut settings = serde_json::json!({ "hooks": {} });
+        ensure_hook_entry(
+            &mut settings,
+            "PreToolUse",
+            HookEntry {
+                matcher: "Glob|Grep",
+                search_term: "qartez-guard",
+                command: "bash /path/to/guard.sh",
+                timeout: 3000,
+            },
+        );
+        let arr = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "Glob|Grep");
+        let hooks = arr[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks[0]["command"], "bash /path/to/guard.sh");
+        assert_eq!(hooks[0]["timeout"], 3000);
+        assert_eq!(hooks[0]["type"], "command");
+    }
+
+    #[test]
+    fn ensure_hook_entry_refreshes_existing_command() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Glob|Grep",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "bash /old/path/guard.sh",
+                        "timeout": 3000
+                    }]
+                }]
+            }
+        });
+        ensure_hook_entry(
+            &mut settings,
+            "PreToolUse",
+            HookEntry {
+                matcher: "Glob|Grep",
+                search_term: "guard.sh",
+                command: "bash /new/path/guard.sh",
+                timeout: 3000,
+            },
+        );
+        let arr = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "should refresh, not duplicate");
+        let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, "bash /new/path/guard.sh");
+    }
+
+    #[test]
+    fn ensure_hook_entry_preserves_different_matcher() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Glob|Grep",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "bash /guard.sh",
+                        "timeout": 3000
+                    }]
+                }]
+            }
+        });
+        ensure_hook_entry(
+            &mut settings,
+            "PreToolUse",
+            HookEntry {
+                matcher: "Edit|Write",
+                search_term: "qartez-guard",
+                command: "/bin/qartez-guard",
+                timeout: 3000,
+            },
+        );
+        let arr = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "different matchers must coexist");
+        assert_eq!(arr[0]["matcher"], "Glob|Grep");
+        assert_eq!(arr[1]["matcher"], "Edit|Write");
+    }
+
+    #[test]
+    fn ensure_hook_entry_handles_missing_hooks_type() {
+        let mut settings = serde_json::json!({ "hooks": {} });
+        ensure_hook_entry(
+            &mut settings,
+            "PreToolUse",
+            HookEntry {
+                matcher: "Glob",
+                search_term: "qartez-guard",
+                command: "/bin/guard",
+                timeout: 5000,
+            },
+        );
+        assert!(settings["hooks"]["PreToolUse"].is_array());
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
     }
 }

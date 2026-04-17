@@ -143,7 +143,7 @@ mod tests {
         // Simulate a signature like: "fn func(парам: Тип)" padded to cross 200 bytes
         let prefix = "fn func(";
         let cyrillic_fill = "а".repeat(100); // 200 bytes of Cyrillic
-        let sig = format!("{}{}", prefix, cyrillic_fill);
+        let sig = format!("{prefix}{cyrillic_fill}");
         assert!(sig.len() > 200);
 
         let boundary = floor_char_boundary(&sig, 200);

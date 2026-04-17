@@ -175,23 +175,22 @@ impl ScoreBreakdown {
 }
 
 pub(super) fn replace_whole_word(text: &str, old: &str, new: &str) -> String {
+    if old.is_empty() {
+        return text.to_string();
+    }
     let mut result = String::with_capacity(text.len());
     let mut start = 0;
     while let Some(pos) = text[start..].find(old) {
         let abs_pos = start + pos;
-        let before_ok = if abs_pos == 0 {
-            true
-        } else {
-            let ch = text[..abs_pos].chars().next_back().unwrap();
-            !ch.is_alphanumeric() && ch != '_'
-        };
+        let before_ok = text[..abs_pos]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
         let after_pos = abs_pos + old.len();
-        let after_ok = if after_pos >= text.len() {
-            true
-        } else {
-            let ch = text[after_pos..].chars().next().unwrap();
-            !ch.is_alphanumeric() && ch != '_'
-        };
+        let after_ok = text[after_pos..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
 
         if before_ok && after_ok {
             result.push_str(&text[start..abs_pos]);
@@ -335,6 +334,23 @@ pub(super) fn is_test_path(path: &str) -> bool {
     false
 }
 
+/// Returns true if the Rust source at `path` contains inline test markers
+/// (`#[test]`, `#[cfg(test)]`, or custom test attributes like `#[tokio::test]`).
+///
+/// Used by `test_gaps` to avoid flagging idiomatic Rust files with inline
+/// `mod tests` blocks as "untested" just because no external test file imports
+/// them. Non-Rust paths and unreadable files return `false`.
+pub(super) fn has_inline_rust_tests(project_root: &std::path::Path, path: &str) -> bool {
+    if !path.ends_with(".rs") {
+        return false;
+    }
+    let abs_path = project_root.join(path);
+    let Ok(source) = std::fs::read_to_string(&abs_path) else {
+        return false;
+    };
+    source.contains("#[cfg(test)]") || source.contains("#[test]") || source.contains("::test]")
+}
+
 /// Convert a file path or symbol name into a valid Mermaid node ID.
 ///
 /// Mermaid node IDs must be alphanumeric (plus underscores). Characters like
@@ -363,4 +379,264 @@ pub(super) fn mermaid_node_id(name: &str) -> String {
 /// replaced with safe alternatives.
 pub(super) fn mermaid_label(label: &str) -> String {
     label.replace('"', "'").replace(']', ")")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_whole_word;
+
+    #[test]
+    fn replace_empty_text_returns_empty() {
+        assert_eq!(replace_whole_word("", "foo", "bar"), "");
+    }
+
+    #[test]
+    fn replace_no_match_returns_input_unchanged() {
+        assert_eq!(replace_whole_word("abc xyz", "foo", "bar"), "abc xyz");
+    }
+
+    #[test]
+    fn replace_exact_match_returns_replacement() {
+        assert_eq!(replace_whole_word("foo", "foo", "bar"), "bar");
+    }
+
+    #[test]
+    fn replace_at_start() {
+        assert_eq!(replace_whole_word("foo bar", "foo", "X"), "X bar");
+    }
+
+    #[test]
+    fn replace_at_end() {
+        assert_eq!(replace_whole_word("bar foo", "foo", "X"), "bar X");
+    }
+
+    #[test]
+    fn replace_multiple_occurrences() {
+        assert_eq!(replace_whole_word("foo foo foo", "foo", "X"), "X X X");
+    }
+
+    #[test]
+    fn replace_respects_alphanumeric_prefix() {
+        assert_eq!(replace_whole_word("xfoo", "foo", "X"), "xfoo");
+    }
+
+    #[test]
+    fn replace_respects_alphanumeric_suffix() {
+        assert_eq!(replace_whole_word("foox", "foo", "X"), "foox");
+    }
+
+    #[test]
+    fn replace_respects_digit_prefix() {
+        assert_eq!(replace_whole_word("1foo", "foo", "X"), "1foo");
+    }
+
+    #[test]
+    fn replace_respects_digit_suffix() {
+        assert_eq!(replace_whole_word("foo1", "foo", "X"), "foo1");
+    }
+
+    #[test]
+    fn replace_respects_underscore_prefix() {
+        assert_eq!(replace_whole_word("_foo", "foo", "X"), "_foo");
+    }
+
+    #[test]
+    fn replace_respects_underscore_suffix() {
+        assert_eq!(replace_whole_word("foo_", "foo", "X"), "foo_");
+    }
+
+    #[test]
+    fn replace_after_punctuation() {
+        assert_eq!(replace_whole_word(".foo", "foo", "X"), ".X");
+        assert_eq!(replace_whole_word("(foo)", "foo", "X"), "(X)");
+    }
+
+    #[test]
+    fn replace_before_punctuation() {
+        assert_eq!(replace_whole_word("foo.", "foo", "X"), "X.");
+        assert_eq!(replace_whole_word("foo;bar", "foo", "X"), "X;bar");
+    }
+
+    #[test]
+    fn replace_surrounded_by_whitespace() {
+        assert_eq!(replace_whole_word(" foo ", "foo", "X"), " X ");
+        assert_eq!(replace_whole_word("\tfoo\n", "foo", "X"), "\tX\n");
+    }
+
+    #[test]
+    fn replace_blocked_by_non_ascii_alphanumeric_prefix() {
+        // Greek Omega is a Letter in Unicode, counts as alphanumeric.
+        assert_eq!(replace_whole_word("\u{03A9}foo", "foo", "X"), "\u{03A9}foo");
+    }
+
+    #[test]
+    fn replace_blocked_by_cjk_prefix() {
+        // CJK ideograph is a Letter in Unicode.
+        assert_eq!(replace_whole_word("\u{6587}foo", "foo", "X"), "\u{6587}foo");
+    }
+
+    #[test]
+    fn replace_allowed_after_non_alphanumeric_unicode_punctuation() {
+        // « is punctuation, not alphanumeric.
+        assert_eq!(
+            replace_whole_word("\u{00AB}foo\u{00BB}", "foo", "X"),
+            "\u{00AB}X\u{00BB}"
+        );
+    }
+
+    #[test]
+    fn replace_does_not_match_substring_of_longer_word() {
+        // `foo` inside `foobar` must not be replaced.
+        assert_eq!(replace_whole_word("foobar", "foo", "X"), "foobar");
+        assert_eq!(replace_whole_word("barfoo", "foo", "X"), "barfoo");
+    }
+
+    #[test]
+    fn replace_handles_mixed_whole_and_partial_matches() {
+        // First `foo` is standalone, second is part of `foobar`.
+        assert_eq!(
+            replace_whole_word("foo foobar foo", "foo", "X"),
+            "X foobar X"
+        );
+    }
+
+    #[test]
+    fn replace_with_longer_replacement() {
+        assert_eq!(replace_whole_word("foo bar", "foo", "LONGER"), "LONGER bar");
+    }
+
+    #[test]
+    fn replace_with_shorter_replacement() {
+        assert_eq!(replace_whole_word("LONGER bar", "LONGER", "X"), "X bar");
+    }
+
+    #[test]
+    fn replace_preserves_trailing_content_after_non_matching_occurrence() {
+        // `foox` is blocked, `foo` at end is allowed, verify trailing text.
+        assert_eq!(
+            replace_whole_word("foox and foo tail", "foo", "X"),
+            "foox and X tail"
+        );
+    }
+
+    #[test]
+    fn replace_identical_old_and_new_is_idempotent_for_valid_matches() {
+        assert_eq!(replace_whole_word("foo bar", "foo", "foo"), "foo bar");
+    }
+
+    #[test]
+    fn replace_non_match_position_advances_past_old() {
+        // After a blocked match at `xfoo`, the scan must resume at position
+        // just past the `old` we tried, not loop forever.
+        assert_eq!(replace_whole_word("xfoo foo", "foo", "X"), "xfoo X");
+    }
+
+    #[test]
+    fn replace_empty_old_returns_text_unchanged() {
+        assert_eq!(replace_whole_word("foo bar", "", "X"), "foo bar");
+        assert_eq!(replace_whole_word("", "", "X"), "");
+    }
+
+    #[test]
+    fn replace_empty_old_with_non_empty_new_returns_text_unchanged() {
+        assert_eq!(
+            replace_whole_word("alpha beta", "", "INSERTED"),
+            "alpha beta"
+        );
+    }
+
+    #[test]
+    fn replace_empty_old_with_unicode_text_returns_text_unchanged() {
+        assert_eq!(replace_whole_word("α β γ", "", "X"), "α β γ");
+    }
+
+    #[test]
+    fn replace_non_empty_old_empty_new_removes_old_as_whole_word() {
+        assert_eq!(replace_whole_word("foo bar foo", "foo", ""), " bar ");
+    }
+
+    #[test]
+    fn replace_whole_word_is_idempotent_on_repeated_empty_old() {
+        let input = "untouched text";
+        let once = replace_whole_word(input, "", "X");
+        let twice = replace_whole_word(&once, "", "X");
+        let thrice = replace_whole_word(&twice, "", "X");
+        assert_eq!(once, input);
+        assert_eq!(twice, input);
+        assert_eq!(thrice, input);
+    }
+
+    /// Reference implementation mirroring the inline word-boundary scan in
+    /// `qartez_rename`'s non-tree-sitter fallback. This exists to assert that
+    /// the per-line rename logic agrees with `replace_whole_word` on every
+    /// input, so both code paths share a single tested semantic.
+    fn per_line_rename(content: &str, old: &str, new: &str) -> String {
+        let mut out = String::new();
+        for (idx, line) in content.lines().enumerate() {
+            if idx > 0 {
+                out.push('\n');
+            }
+            let mut new_line = String::new();
+            let mut start = 0;
+            while let Some(pos) = line[start..].find(old) {
+                let abs_pos = start + pos;
+                let before_ok = line[..abs_pos]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+                let after_pos = abs_pos + old.len();
+                let after_ok = line[after_pos..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+                if before_ok && after_ok {
+                    new_line.push_str(&line[start..abs_pos]);
+                    new_line.push_str(new);
+                } else {
+                    new_line.push_str(&line[start..abs_pos + old.len()]);
+                }
+                start = abs_pos + old.len();
+            }
+            new_line.push_str(&line[start..]);
+            out.push_str(&new_line);
+        }
+        out
+    }
+
+    #[test]
+    fn per_line_rename_matches_replace_whole_word_on_single_line_inputs() {
+        let cases = [
+            ("foo", "foo", "X"),
+            ("foo bar", "foo", "X"),
+            ("xfoo", "foo", "X"),
+            ("foox", "foo", "X"),
+            ("_foo", "foo", "X"),
+            ("foo_", "foo", "X"),
+            (".foo.", "foo", "X"),
+            ("foo foo foo", "foo", "X"),
+            ("foo foobar foo", "foo", "X"),
+            ("\u{03A9}foo", "foo", "X"),
+            ("\u{00AB}foo\u{00BB}", "foo", "X"),
+            ("", "foo", "X"),
+            ("abc", "foo", "X"),
+        ];
+        for (text, old, new) in cases {
+            let whole = replace_whole_word(text, old, new);
+            let lined = per_line_rename(text, old, new);
+            assert_eq!(
+                whole, lined,
+                "divergence on input ({text:?}, {old:?}, {new:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn per_line_rename_handles_multi_line_independently() {
+        // Each line is scanned separately - a word on line 1 does not affect
+        // matching on line 2. Verifies the fallback's per-line iteration
+        // does not carry state between lines.
+        let input = "foo\nfoox\n_foo\nfoo bar";
+        let expected = "X\nfoox\n_foo\nX bar";
+        assert_eq!(per_line_rename(input, "foo", "X"), expected);
+    }
 }

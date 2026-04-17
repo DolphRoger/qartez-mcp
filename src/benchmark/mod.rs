@@ -385,3 +385,38 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
         sorted[lo] * (1.0 - frac) + sorted[hi] * frac
     }
 }
+
+/// Returns the short Git SHA of the current HEAD, or `None` if the
+/// `git` command is unavailable, the working directory is not a Git
+/// repository, or the output is empty.
+pub fn git_sha() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `git_sha` must return `Option<String>` without panicking in any
+    /// environment (no Git, detached HEAD, CI sandboxes). When it does return a
+    /// short SHA, the SHA must be at least 4 hex characters - Git's minimum
+    /// short-SHA length.
+    #[test]
+    fn git_sha_returns_some_or_none_without_panic() {
+        let result: Option<String> = git_sha();
+        if let Some(sha) = result {
+            assert!(
+                sha.len() >= 4,
+                "git short SHA should be at least 4 chars, got {sha:?}"
+            );
+        }
+    }
+}

@@ -178,7 +178,7 @@ fn format_deny_reason(
         let parts: Vec<String> = facts
             .hot_symbols
             .iter()
-            .map(|(name, rank)| format!("{} (pr={:.3})", name, rank))
+            .map(|(name, rank)| format!("{name} (pr={rank:.3})"))
             .collect();
         reason.push_str(" Hot symbols in this file: ");
         reason.push_str(&parts.join(", "));

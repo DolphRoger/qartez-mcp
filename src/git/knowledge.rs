@@ -230,13 +230,18 @@ mod tests {
             .expect("failed to create commit");
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct Author<'a> {
+        name: &'a str,
+        email: &'a str,
+    }
+
     fn make_commit_as(
         repo: &Repository,
         dir: &Path,
         files: &[(&str, &str)],
         message: &str,
-        author: &str,
-        email: &str,
+        author: Author<'_>,
     ) {
         for &(name, content) in files {
             let full = dir.join(name);
@@ -252,7 +257,7 @@ mod tests {
         index.write().expect("failed to write index");
         let tree_oid = index.write_tree().expect("failed to write tree");
         let tree = repo.find_tree(tree_oid).expect("failed to find tree");
-        let sig = Signature::now(author, email).expect("failed to create sig");
+        let sig = Signature::now(author.name, author.email).expect("failed to create sig");
         let parents: Vec<git2::Commit<'_>> = match repo.head() {
             Ok(head) => vec![
                 head.peel_to_commit()
@@ -321,21 +326,25 @@ mod tests {
             dir.path(),
             &[("lib.rs", "line1\nline2\nline3\n")],
             "alice commit",
-            "Alice",
-            "alice@test.com",
+            Author {
+                name: "Alice",
+                email: "alice@test.com",
+            },
         );
         make_commit_as(
             &repo,
             dir.path(),
             &[("lib.rs", "line1\nline2\nline3\nline4\nline5\nline6\n")],
             "bob commit",
-            "Bob",
-            "bob@test.com",
+            Author {
+                name: "Bob",
+                email: "bob@test.com",
+            },
         );
 
         let result = analyze_knowledge(dir.path(), &["lib.rs".into()], None).unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result[0].authors.len() >= 1);
+        assert!(!result[0].authors.is_empty());
     }
 
     #[test]
@@ -347,8 +356,10 @@ mod tests {
             dir.path(),
             &[("a.rs", "fn a() {}\n")],
             "alice only",
-            "Alice",
-            "alice@test.com",
+            Author {
+                name: "Alice",
+                email: "alice@test.com",
+            },
         );
 
         let result = analyze_knowledge(dir.path(), &["a.rs".into()], Some("NonExistent")).unwrap();
@@ -430,8 +441,10 @@ mod tests {
             dir.path(),
             &[("a.rs", "fn a() {}\n")],
             "commit",
-            "Alice Smith",
-            "alice@test.com",
+            Author {
+                name: "Alice Smith",
+                email: "alice@test.com",
+            },
         );
         // Filter with different case should still match
         let result = analyze_knowledge(dir.path(), &["a.rs".into()], Some("ALICE")).unwrap();
@@ -526,8 +539,10 @@ mod tests {
             dir.path(),
             &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\nfn b2() {}\n")],
             "init",
-            "Alice",
-            "alice@test.com",
+            Author {
+                name: "Alice",
+                email: "alice@test.com",
+            },
         );
         let result = analyze_knowledge(dir.path(), &["a.rs".into(), "b.rs".into()], None).unwrap();
         assert_eq!(result.len(), 2, "should return both files");

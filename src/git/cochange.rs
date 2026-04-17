@@ -219,7 +219,7 @@ mod tests {
                 fs::create_dir_all(parent).unwrap();
             }
             let existing = fs::read_to_string(&file_path).unwrap_or_default();
-            fs::write(&file_path, format!("{}\n// edit", existing)).unwrap();
+            fs::write(&file_path, format!("{existing}\n// edit")).unwrap();
             index.add_path(Path::new(file)).unwrap();
         }
 
@@ -327,7 +327,7 @@ mod tests {
         let repo = init_repo(dir);
         let conn = setup_db();
 
-        let many_files: Vec<String> = (0..25).map(|i| format!("file_{}.rs", i)).collect();
+        let many_files: Vec<String> = (0..25).map(|i| format!("file_{i}.rs")).collect();
         let many_refs: Vec<&str> = many_files.iter().map(|s| s.as_str()).collect();
         make_commit(&repo, dir, &many_refs, "large commit");
 

@@ -306,6 +306,13 @@ fn read_package_json_scripts(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Executes `cmd[0]` with `cmd[1..]` as arguments, plus an optional `filter`.
+///
+/// `cmd` is trusted: callers build it from toolchain detection
+/// (`detect_toolchain`, `package.json` scripts, hardcoded build-tool names).
+/// MCP parameters never flow into `cmd[0]`. The `filter` path is the only
+/// caller-controlled slot and is validated in `project.rs` to reject values
+/// starting with `-`.
 pub fn run_command(
     project_root: &Path,
     cmd: &[String],

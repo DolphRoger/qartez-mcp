@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::{self, children, node_text};
 use crate::index::symbols::{
     ExtractedImport, ExtractedReference, ExtractedSymbol, ParseResult, ReferenceKind, SymbolKind,
 };
-use crate::str_utils::floor_char_boundary;
 
 /// Identifier -> declared type name, populated from formal parameters, typed
 /// locals, and (for methods) enclosing-class fields. Used by the resolver's
@@ -49,10 +49,6 @@ impl LanguageSupport for DartSupport {
             ..Default::default()
         }
     }
-}
-
-fn children(node: Node) -> impl Iterator<Item = Node> {
-    (0..node.child_count() as u32).filter_map(move |i| node.child(i))
 }
 
 fn is_dart_exported(name: &str) -> bool {
@@ -497,7 +493,7 @@ fn find_configurable_uri(node: Node, source: &[u8]) -> Option<String> {
         }
         if child.kind() == "configurable_uri" {
             let raw = node_text(child, source);
-            return Some(unquote_dart(raw));
+            return Some(common::unquote(&raw));
         }
     }
     None
@@ -506,7 +502,7 @@ fn find_configurable_uri(node: Node, source: &[u8]) -> Option<String> {
 fn extract_part(node: Node, source: &[u8]) -> Option<ExtractedImport> {
     let uri_node = children(node).find(|c| c.kind() == "uri")?;
     let raw = node_text(uri_node, source);
-    let path = unquote_dart(raw);
+    let path = common::unquote(&raw);
     if path.is_empty() {
         return None;
     }
@@ -572,46 +568,8 @@ fn extract_initialized_list(node: Node, source: &[u8], symbols: &mut Vec<Extract
     }
 }
 
-fn unquote_dart(s: String) -> String {
-    let trimmed = s.trim();
-    if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        || (trimmed.starts_with('"') && trimmed.ends_with('"'))
-    {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    let text = std::str::from_utf8(&source[start..end]).ok()?;
-
-    let sig = if let Some(brace_pos) = text.find('{') {
-        text[..brace_pos].trim()
-    } else {
-        text.lines().next().unwrap_or(text).trim()
-    };
-
-    if sig.is_empty() {
-        return None;
-    }
-
-    let truncated = if sig.len() > 200 {
-        &sig[..floor_char_boundary(sig, 200)]
-    } else {
-        sig
-    };
-    Some(truncated.to_string())
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
+    common::brace_or_first_line_signature(node, source)
 }
 
 /// Walks `root` and records call-site and type-reference edges. Dart's

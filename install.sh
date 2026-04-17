@@ -89,7 +89,7 @@ fi
 
 # --- Rust ---
 # Must match `rust-version` in Cargo.toml. Edition 2024 needs >= 1.85.
-RUST_MIN="1.85.0"
+RUST_MIN="1.88.0"
 
 if command -v cargo >/dev/null 2>&1; then
     CARGO="$(command -v cargo)"
@@ -112,7 +112,7 @@ else
 fi
 
 # Version check: catch old rustc before cargo emits cryptic feature-gate errors.
-# `rustc --version` output: "rustc 1.85.0 (abc 2025-02-20)"
+# `rustc --version` output: "rustc 1.88.0 (abc 2025-06-26)"
 RUSTC_BIN="$(dirname "$CARGO")/rustc"
 [ -x "$RUSTC_BIN" ] || RUSTC_BIN="rustc"
 if command -v "$RUSTC_BIN" >/dev/null 2>&1; then

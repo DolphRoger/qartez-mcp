@@ -22,9 +22,6 @@ pub const EMBEDDING_DIM: usize = 768;
 /// per-call overhead but increase peak RSS.
 const DEFAULT_BATCH_SIZE: usize = 64;
 
-/// HuggingFace model ID for the code embedding model.
-pub const MODEL_ID: &str = "jinaai/jina-embeddings-v2-base-code";
-
 /// Expected ONNX model filename inside the model directory.
 pub const MODEL_FILENAME: &str = "model.onnx";
 
@@ -366,7 +363,7 @@ mod tests {
 
     #[test]
     fn blob_round_trip() {
-        let original = vec![1.0f32, -2.5, 3.14, 0.0, f32::MAX, f32::MIN];
+        let original = vec![1.0f32, -2.5, 3.25, 0.0, f32::MAX, f32::MIN];
         let blob = vec_to_blob(&original);
         assert_eq!(blob.len(), original.len() * 4);
         let restored = blob_to_vec(&blob);

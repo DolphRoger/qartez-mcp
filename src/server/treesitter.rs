@@ -160,11 +160,11 @@ pub(super) fn capitalize_kind(kind: &str) -> String {
         Some(c) => {
             let upper: String = c.to_uppercase().collect();
             let rest: String = chars.collect();
-            let singular = format!("{}{}", upper, rest);
+            let singular = format!("{upper}{rest}");
             if singular.ends_with('s') || singular.ends_with("sh") || singular.ends_with("ch") {
-                format!("{}es", singular)
+                format!("{singular}es")
             } else {
-                format!("{}s", singular)
+                format!("{singular}s")
             }
         }
     }

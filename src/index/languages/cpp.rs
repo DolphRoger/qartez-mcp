@@ -1,6 +1,7 @@
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::{self, children, node_text};
 use crate::index::symbols::{
     ExtractedImport, ExtractedReference, ExtractedSymbol, ParseResult, ReferenceKind, SymbolKind,
 };
@@ -41,10 +42,6 @@ impl LanguageSupport for CppSupport {
             ..Default::default()
         }
     }
-}
-
-fn children(node: Node) -> impl Iterator<Item = Node> {
-    (0..node.child_count() as u32).filter_map(move |i| node.child(i))
 }
 
 fn has_static_storage(node: Node, source: &[u8]) -> bool {
@@ -609,30 +606,7 @@ fn find_declarator_name(node: Node, source: &[u8]) -> Option<String> {
 }
 
 fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    let text = std::str::from_utf8(&source[start..end]).ok()?;
-
-    let sig = if let Some(brace_pos) = text.find('{') {
-        text[..brace_pos].trim()
-    } else {
-        text.lines().next().unwrap_or(text).trim()
-    };
-
-    if sig.is_empty() {
-        return None;
-    }
-
-    let truncated = if sig.len() > 200 { &sig[..200] } else { sig };
-    Some(truncated.to_string())
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
+    common::brace_or_first_line_signature(node, source)
 }
 
 #[cfg(test)]

@@ -5666,6 +5666,769 @@ fn mermaid_label_escapes_quotes() {
 }
 
 // =========================================================================
+// Section: qartez_calls direction-specific helpers (post-refactor)
+// =========================================================================
+
+#[test]
+fn qartez_calls_callers_only_omits_callees_section() {
+    let (server, _dir) = setup();
+    let result = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "helper".into(),
+            direction: Some(CallDirection::Callers),
+            depth: None,
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        result.contains("callers:"),
+        "callers section expected: {result}"
+    );
+    assert!(
+        !result.contains("callees:"),
+        "callees section must NOT appear in callers-only mode: {result}"
+    );
+}
+
+#[test]
+fn qartez_calls_callees_only_omits_callers_section() {
+    let (server, _dir) = setup();
+    let result = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "main".into(),
+            direction: Some(CallDirection::Callees),
+            depth: None,
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        result.contains("callees:"),
+        "callees section expected: {result}"
+    );
+    assert!(
+        !result.contains("callers:"),
+        "callers section must NOT appear in callees-only mode: {result}"
+    );
+}
+
+#[test]
+fn qartez_calls_both_includes_both_sections() {
+    let (server, _dir) = setup();
+    let result = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "helper".into(),
+            direction: Some(CallDirection::Both),
+            depth: None,
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(result.contains("callers:"), "callers section: {result}");
+    assert!(result.contains("callees:"), "callees section: {result}");
+}
+
+#[test]
+fn qartez_calls_depth2_only_with_callees() {
+    let (server, _dir) = setup();
+    // depth=2 should produce depth2 section when callees direction
+    let with_d2 = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "main".into(),
+            direction: Some(CallDirection::Callees),
+            depth: Some(2),
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap();
+    let without_d2 = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "main".into(),
+            direction: Some(CallDirection::Callees),
+            depth: Some(1),
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        with_d2.contains("depth2:"),
+        "depth=2 should produce depth2 section: {with_d2}"
+    );
+    assert!(
+        !without_d2.contains("depth2:"),
+        "depth=1 should NOT produce depth2 section: {without_d2}"
+    );
+}
+
+#[test]
+fn qartez_calls_depth2_skipped_for_callers_only() {
+    let (server, _dir) = setup();
+    // depth=2 only fires when callees is requested
+    let result = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "helper".into(),
+            direction: Some(CallDirection::Callers),
+            depth: Some(2),
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !result.contains("depth2:"),
+        "depth2 should not run when only callers requested: {result}"
+    );
+}
+
+#[test]
+fn qartez_calls_concise_omits_caller_details() {
+    let (server, _dir) = setup();
+    let detailed = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "helper".into(),
+            direction: Some(CallDirection::Callers),
+            depth: None,
+            format: Some(Format::Detailed),
+            ..Default::default()
+        }))
+        .unwrap();
+    let concise = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "helper".into(),
+            direction: Some(CallDirection::Callers),
+            depth: None,
+            format: Some(Format::Concise),
+            ..Default::default()
+        }))
+        .unwrap();
+    // Detailed should have @ filename references; concise should just have count
+    if detailed.contains("callers: ") && !detailed.contains("callers: none") {
+        assert!(
+            detailed.lines().count() > concise.lines().count(),
+            "detailed must have more lines than concise:\nDETAILED:\n{detailed}\nCONCISE:\n{concise}"
+        );
+    }
+}
+
+#[test]
+fn qartez_calls_no_symbol_errors() {
+    let (server, _dir) = setup();
+    let err = server
+        .qartez_calls(Parameters(SoulCallsParams {
+            name: "definitely_not_a_real_symbol_xyz".into(),
+            direction: None,
+            depth: None,
+            format: None,
+            ..Default::default()
+        }))
+        .unwrap_err();
+    assert!(
+        err.contains("No symbol") || err.contains("not found"),
+        "missing symbol error: {err}"
+    );
+}
+
+// =========================================================================
+// Section: qartez_test_gaps semantic equivalence (post-refactor)
+// =========================================================================
+
+fn setup_test_gaps_fixture() -> (QartezServer, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    let tests_dir = dir.path().join("tests");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&tests_dir).unwrap();
+
+    let conn = setup_db();
+
+    // Source files: utils.rs is covered by tests/test_utils.rs
+    // models.rs is uncovered.
+    let f_main = write::upsert_file(&conn, "src/main.rs", 1000, 200, "rust", 12).unwrap();
+    let f_utils = write::upsert_file(&conn, "src/utils.rs", 1000, 150, "rust", 11).unwrap();
+    let f_models = write::upsert_file(&conn, "src/models.rs", 1000, 300, "rust", 22).unwrap();
+    let f_test_utils =
+        write::upsert_file(&conn, "tests/test_utils.rs", 1000, 50, "rust", 5).unwrap();
+
+    write::insert_symbols(
+        &conn,
+        f_utils,
+        &[SymbolInsert {
+            name: "helper".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 1,
+            signature: Some("pub fn helper()".into()),
+            is_exported: true,
+            shape_hash: None,
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: Some(20),
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+    write::insert_symbols(
+        &conn,
+        f_models,
+        &[SymbolInsert {
+            name: "Config".into(),
+            kind: "struct".into(),
+            line_start: 1,
+            line_end: 1,
+            signature: Some("pub struct Config".into()),
+            is_exported: true,
+            shape_hash: None,
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: None,
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+
+    // Test file imports source file (this is what 'gaps' detection looks for)
+    write::insert_edge(&conn, f_test_utils, f_utils, "import", Some("helper")).unwrap();
+    write::insert_edge(&conn, f_main, f_utils, "import", Some("helper")).unwrap();
+    write::insert_edge(&conn, f_main, f_models, "import", Some("Config")).unwrap();
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    (server, dir)
+}
+
+#[test]
+fn qartez_test_gaps_default_mode_is_gaps() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("Test coverage gaps") || out.contains("All source files"),
+        "default mode should run 'gaps':\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_gaps_finds_uncovered_source() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("gaps".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("src/models.rs"),
+        "models.rs has no test importer, must appear in gaps:\n{out}"
+    );
+    assert!(
+        !out.contains("src/utils.rs"),
+        "utils.rs IS imported by tests/test_utils.rs, must NOT appear:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_gaps_excludes_test_files() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("gaps".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !out.contains("tests/test_utils.rs"),
+        "test files should never appear in gaps output:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_gaps_min_pagerank_filters() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("gaps".into()),
+            min_pagerank: Some(0.99),
+            ..Default::default()
+        }))
+        .unwrap();
+    // Threshold so high nothing should pass
+    assert!(
+        out.contains("No untested source files") || !out.contains("src/models.rs"),
+        "high min_pagerank must filter out everything:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_map_full_mapping() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("map".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("Test-to-source mapping"),
+        "map mode header missing:\n{out}"
+    );
+    assert!(
+        out.contains("src/utils.rs"),
+        "utils.rs is covered, should be in map:\n{out}"
+    );
+    assert!(
+        out.contains("tests/test_utils.rs"),
+        "test file should be listed under its source:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_map_per_file_source() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("map".into()),
+            file_path: Some("src/utils.rs".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("Test coverage: src/utils.rs"),
+        "scoped header missing:\n{out}"
+    );
+    assert!(
+        out.contains("tests/test_utils.rs"),
+        "should list the importing test file:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_map_per_file_test() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("map".into()),
+            file_path: Some("tests/test_utils.rs".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("Imports") && out.contains("source file"),
+        "test-file scoped output should describe source imports:\n{out}"
+    );
+    assert!(
+        out.contains("src/utils.rs"),
+        "must list the source file imported by the test:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_map_per_file_uncovered_source() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("map".into()),
+            file_path: Some("src/models.rs".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("no test files importing it"),
+        "uncovered source must report no tests:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_map_include_symbols_lists_exports() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("map".into()),
+            file_path: Some("src/utils.rs".into()),
+            include_symbols: Some(true),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("exported symbols"),
+        "include_symbols should list exports:\n{out}"
+    );
+    assert!(
+        out.contains("helper"),
+        "exported symbol 'helper' should appear:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_suggest_requires_base() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let err = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("suggest".into()),
+            base: None,
+            ..Default::default()
+        }))
+        .unwrap_err();
+    assert!(
+        err.contains("'base' parameter"),
+        "suggest must reject missing base:\n{err}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_unknown_mode_errors() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let err = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("nonsense".into()),
+            ..Default::default()
+        }))
+        .unwrap_err();
+    assert!(
+        err.contains("Unknown mode"),
+        "must reject unknown mode:\n{err}"
+    );
+    assert!(
+        err.contains("'map'") && err.contains("'gaps'") && err.contains("'suggest'"),
+        "error must list available modes:\n{err}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_concise_format_is_compact() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let detailed = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("gaps".into()),
+            format: Some(Format::Detailed),
+            ..Default::default()
+        }))
+        .unwrap();
+    let concise = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("gaps".into()),
+            format: Some(Format::Concise),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !concise.contains("|------|"),
+        "concise must not use markdown table headers:\n{concise}"
+    );
+    assert!(
+        detailed.contains("| File ") || detailed.contains("All source files"),
+        "detailed should use markdown table or empty marker:\n{detailed}"
+    );
+}
+
+#[test]
+fn qartez_test_gaps_limit_truncates() {
+    let (server, _dir) = setup_test_gaps_fixture();
+    let out = server
+        .qartez_test_gaps(Parameters(SoulTestGapsParams {
+            mode: Some("gaps".into()),
+            limit: Some(0),
+            ..Default::default()
+        }))
+        .unwrap();
+    // limit=0 means take(0) - no rows shown beyond header
+    assert!(
+        !out.contains("src/models.rs") || out.contains("Showing 0"),
+        "limit=0 should suppress rows or note truncation:\n{out}"
+    );
+}
+
+// =========================================================================
+// Section: qartez_smells semantic equivalence (post-refactor)
+// =========================================================================
+
+fn setup_smells_fixture() -> (QartezServer, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    let conn = setup_db();
+
+    let f_godf = write::upsert_file(&conn, "src/godf.rs", 1000, 1000, "rust", 1).unwrap();
+    let f_lp = write::upsert_file(&conn, "src/longparams.rs", 1000, 200, "rust", 1).unwrap();
+    let f_envy = write::upsert_file(&conn, "src/envy.rs", 1000, 500, "rust", 1).unwrap();
+
+    // God function: CC=50, lines=80
+    write::insert_symbols(
+        &conn,
+        f_godf,
+        &[SymbolInsert {
+            name: "huge_fn".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 80,
+            signature: Some("pub fn huge_fn()".into()),
+            is_exported: true,
+            shape_hash: None,
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: Some(50),
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+
+    // Long parameters: 7 params
+    write::insert_symbols(
+        &conn,
+        f_lp,
+        &[SymbolInsert {
+            name: "many_args".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 5,
+            signature: Some(
+                "pub fn many_args(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32)".into(),
+            ),
+            is_exported: true,
+            shape_hash: None,
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: Some(2),
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+
+    // Below threshold for both
+    write::insert_symbols(
+        &conn,
+        f_envy,
+        &[SymbolInsert {
+            name: "small_fn".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 5,
+            signature: Some("pub fn small_fn(x: i32)".into()),
+            is_exported: true,
+            shape_hash: None,
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: Some(2),
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    (server, dir)
+}
+
+#[test]
+fn qartez_smells_detects_god_function() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("God Functions"),
+        "god functions header:\n{out}"
+    );
+    assert!(out.contains("huge_fn"), "huge_fn must be detected:\n{out}");
+    assert!(out.contains("src/godf.rs"), "file path must appear:\n{out}");
+}
+
+#[test]
+fn qartez_smells_detects_long_params() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("Long Parameter Lists"),
+        "long params header:\n{out}"
+    );
+    assert!(
+        out.contains("many_args"),
+        "many_args must be detected:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_kind_filter_god_only() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            kind: Some("god_function".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(out.contains("huge_fn"), "must include god function:\n{out}");
+    assert!(
+        !out.contains("many_args"),
+        "must exclude long params when filtered:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_kind_filter_params_only() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            kind: Some("long_params".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("many_args"),
+        "must include long params:\n{out}"
+    );
+    assert!(
+        !out.contains("huge_fn"),
+        "must exclude god function when filtered:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_kind_combined_filter() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            kind: Some("god_function,long_params".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(out.contains("huge_fn"), "god function present:\n{out}");
+    assert!(out.contains("many_args"), "long params present:\n{out}");
+}
+
+#[test]
+fn qartez_smells_min_complexity_threshold() {
+    let (server, _dir) = setup_smells_fixture();
+    // huge_fn has CC=50; threshold of 100 should exclude it
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            min_complexity: Some(100),
+            kind: Some("god_function".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !out.contains("huge_fn"),
+        "min_complexity=100 should exclude CC=50 fn:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_min_lines_threshold() {
+    let (server, _dir) = setup_smells_fixture();
+    // huge_fn has 80 lines; threshold of 100 should exclude it
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            min_lines: Some(100),
+            kind: Some("god_function".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !out.contains("huge_fn"),
+        "min_lines=100 should exclude 80-line fn:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_min_params_threshold() {
+    let (server, _dir) = setup_smells_fixture();
+    // many_args has 7 params; threshold of 10 should exclude it
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            min_params: Some(10),
+            kind: Some("long_params".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !out.contains("many_args"),
+        "min_params=10 should exclude 7-param fn:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_no_smells_when_thresholds_unmet() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            min_complexity: Some(999),
+            min_lines: Some(999),
+            min_params: Some(999),
+            envy_ratio: Some(99.0),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("No code smells detected"),
+        "should report no smells:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_concise_format_compact() {
+    let (server, _dir) = setup_smells_fixture();
+    let concise = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            format: Some(Format::Concise),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        !concise.contains("|--------|"),
+        "concise must skip markdown tables:\n{concise}"
+    );
+    assert!(
+        concise.contains("huge_fn"),
+        "should still list smells in concise:\n{concise}"
+    );
+}
+
+#[test]
+fn qartez_smells_file_path_scopes_search() {
+    let (server, _dir) = setup_smells_fixture();
+    let out = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            file_path: Some("src/longparams.rs".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        out.contains("many_args"),
+        "scoped to longparams.rs must include its smell:\n{out}"
+    );
+    assert!(
+        !out.contains("huge_fn"),
+        "scoped to longparams.rs must exclude godf.rs smell:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_smells_file_path_unknown_errors() {
+    let (server, _dir) = setup_smells_fixture();
+    let err = server
+        .qartez_smells(Parameters(SoulSmellsParams {
+            file_path: Some("nonexistent.rs".into()),
+            ..Default::default()
+        }))
+        .unwrap_err();
+    assert!(
+        err.contains("File not found"),
+        "missing file must error:\n{err}"
+    );
+}
+
+// =========================================================================
 // Helpers
 // =========================================================================
 

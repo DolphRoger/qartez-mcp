@@ -100,6 +100,7 @@ fn parse_items(tool: &str, output: &str) -> BTreeSet<String> {
 /// Parses qartez_find output. Matches lines like:
 /// - `+ SymbolName  function  src/foo.rs  L10-L20  pub fn ...`
 /// - `SymbolName  function  src/foo.rs`
+///
 /// Also handles non-MCP grep output with `fn symbol_name` patterns.
 fn parse_find_output(output: &str) -> BTreeSet<String> {
     let mut items = BTreeSet::new();
@@ -123,6 +124,7 @@ fn parse_find_output(output: &str) -> BTreeSet<String> {
 /// Parses qartez_grep output. Matches lines like:
 /// - `+ <name> <kind> <file>` (MCP symbol result lines)
 /// - `file:line:content` (grep content output)
+///
 /// Extracts identifiers from both formats.
 fn parse_grep_output(output: &str) -> BTreeSet<String> {
     let mut items = BTreeSet::new();

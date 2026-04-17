@@ -1,6 +1,7 @@
 pub mod bash;
 pub mod c_lang;
 pub mod caddyfile;
+mod common;
 pub mod cpp;
 pub mod csharp;
 pub mod css;
@@ -176,4 +177,88 @@ pub fn supported_filenames() -> Vec<&'static str> {
 
 pub fn supported_prefixes() -> Vec<&'static str> {
     PREFIX_REGISTRY.iter().map(|e| e.prefix).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_language_for_ext_resolves_rust() {
+        let lang = get_language_for_ext("rs").expect("rust extension must be registered");
+        assert_eq!(lang.language_name(), "rust");
+    }
+
+    #[test]
+    fn get_language_for_ext_returns_none_for_unknown() {
+        assert!(get_language_for_ext("").is_none());
+        assert!(get_language_for_ext("xyz_not_a_real_extension").is_none());
+    }
+
+    #[test]
+    fn get_language_for_ext_is_case_sensitive() {
+        assert!(get_language_for_ext("RS").is_none());
+    }
+
+    #[test]
+    fn get_language_for_filename_resolves_exact_names() {
+        let lang = get_language_for_filename("Dockerfile").expect("Dockerfile must be registered");
+        assert_eq!(lang.language_name(), "dockerfile");
+
+        let lang = get_language_for_filename("Makefile").expect("Makefile must be registered");
+        assert_eq!(lang.language_name(), "makefile");
+    }
+
+    #[test]
+    fn get_language_for_filename_resolves_by_prefix() {
+        let lang =
+            get_language_for_filename("Dockerfile.prod").expect("Dockerfile.* prefix must match");
+        assert_eq!(lang.language_name(), "dockerfile");
+
+        let lang =
+            get_language_for_filename("Jenkinsfile.ci").expect("Jenkinsfile.* prefix must match");
+        assert_eq!(lang.language_name(), "jenkinsfile");
+    }
+
+    #[test]
+    fn get_language_for_filename_returns_none_for_unrelated() {
+        assert!(get_language_for_filename("random_file.log").is_none());
+        assert!(get_language_for_filename("").is_none());
+    }
+
+    #[test]
+    fn supported_extensions_contains_core_languages() {
+        let exts = supported_extensions();
+        for required in ["rs", "py", "go", "ts", "java"] {
+            assert!(
+                exts.contains(&required),
+                "supported_extensions missing {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_filenames_contains_known_entries() {
+        let names = supported_filenames();
+        assert!(names.contains(&"Dockerfile"));
+        assert!(names.contains(&"Makefile"));
+    }
+
+    #[test]
+    fn supported_prefixes_contains_known_entries() {
+        let prefixes = supported_prefixes();
+        assert!(prefixes.contains(&"Dockerfile."));
+        assert!(prefixes.contains(&"Jenkinsfile."));
+    }
+
+    #[test]
+    fn all_languages_register_non_empty_extensions() {
+        for lang in ALL_LANGUAGES.iter() {
+            assert!(
+                !lang.extensions().is_empty(),
+                "language {} registered zero extensions",
+                lang.language_name()
+            );
+        }
+    }
 }

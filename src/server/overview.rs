@@ -64,8 +64,7 @@ impl super::QartezServer {
         let mut out = String::new();
         if concise {
             out.push_str(&format!(
-                "{} files, {} symbols (rank name kind file PR)\n",
-                file_count, symbol_count,
+                "{file_count} files, {symbol_count} symbols (rank name kind file PR)\n",
             ));
         } else {
             out.push_str(&format!(
@@ -195,8 +194,7 @@ impl super::QartezServer {
         let mut out = String::new();
         if concise {
             out.push_str(&format!(
-                "{} files, {} symbols (rank path PR exp \u{2192}blast)\n",
-                file_count, symbol_count,
+                "{file_count} files, {symbol_count} symbols (rank path PR exp \u{2192}blast)\n",
             ));
         } else {
             out.push_str(&format!(

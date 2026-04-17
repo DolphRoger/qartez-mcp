@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    target-branch: main
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    reviewers: []
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      rust-deps:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: main
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    reviewers: []
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      ci-actions:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

@@ -436,7 +436,7 @@ impl BenchmarkReport {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            git_sha: git_sha(),
+            git_sha: super::git_sha(),
             tokenizer: "cl100k_base".to_string(),
             language,
             scenarios,
@@ -675,11 +675,7 @@ pub fn render_markdown(report: &BenchmarkReport) -> String {
         /// (system prompt + CLAUDE.md + tool schemas).
         const SESSION_BASE_TOKENS: f64 = 20_000.0;
 
-        let savings_tokens = if sum_non_mcp_tokens > sum_mcp_tokens {
-            sum_non_mcp_tokens - sum_mcp_tokens
-        } else {
-            0
-        };
+        let savings_tokens = sum_non_mcp_tokens.saturating_sub(sum_mcp_tokens);
         let sessions = savings_tokens as f64 / SESSION_BASE_TOKENS;
         out.push_str("## Session cost context\n\n");
         out.push_str(&format!(
@@ -694,6 +690,35 @@ pub fn render_markdown(report: &BenchmarkReport) -> String {
         .iter()
         .any(|s| s.compilation_check.is_some());
 
+    render_matrix(
+        &mut out,
+        report,
+        any_quality,
+        any_grounding,
+        any_set_comparison,
+        any_compilation_check,
+    );
+
+    if any_quality {
+        render_quality_table(&mut out, report);
+    }
+
+    out.push_str("\n## Per-tool detail\n\n");
+    for r in &report.scenarios {
+        render_scenario_detail(&mut out, r);
+    }
+
+    out
+}
+
+fn render_matrix(
+    out: &mut String,
+    report: &BenchmarkReport,
+    any_quality: bool,
+    any_grounding: bool,
+    any_set_comparison: bool,
+    any_compilation_check: bool,
+) {
     out.push_str("## Matrix\n\n");
     let (matrix_header, matrix_sep) = matrix_header_and_sep(
         any_quality,
@@ -704,228 +729,240 @@ pub fn render_markdown(report: &BenchmarkReport) -> String {
     out.push_str(&matrix_header);
     out.push_str(&matrix_sep);
     for r in &report.scenarios {
-        let marker = if r.non_mcp_is_complete { "" } else { " ✱" };
-        let (non_mcp_tok_cell, savings_cell) = if r.non_mcp_is_complete {
-            (
-                format!("{}", r.non_mcp.tokens),
-                format!("{:+.1}%", r.savings.tokens_pct),
-            )
-        } else {
-            ("-".to_string(), "-".to_string())
-        };
-
-        let mut row = format!(
-            "| `{tool}`{marker} | {mcp_tok} | {non_mcp_tok} | {savings} | {mcp_ms:.2} | {non_mcp_ms:.2} | {speedup:.2}× |",
-            tool = r.tool,
-            marker = marker,
-            mcp_tok = r.mcp.tokens,
-            non_mcp_tok = non_mcp_tok_cell,
-            savings = savings_cell,
-            mcp_ms = r.mcp.latency.mean_us / 1000.0,
-            non_mcp_ms = r.non_mcp.latency.mean_us / 1000.0,
-            speedup = r.savings.latency_ratio,
+        render_matrix_row(
+            out,
+            r,
+            any_quality,
+            any_grounding,
+            any_set_comparison,
+            any_compilation_check,
         );
-
-        if any_set_comparison {
-            let (prec_cell, recall_cell, eff_cell) = match &r.set_comparison {
-                Some(sc) => (
-                    format!("{:.2}", sc.precision),
-                    format!("{:.2}", sc.recall),
-                    r.savings
-                        .effective_savings_pct
-                        .map(|e| format!("{e:+.1}%"))
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-                None => ("-".to_string(), "-".to_string(), "-".to_string()),
-            };
-            row.push_str(&format!(" {prec_cell} | {recall_cell} | {eff_cell} |"));
-        }
-        if any_compilation_check {
-            let compile_cell = match &r.compilation_check {
-                Some(c) if c.passed => "✓",
-                Some(_) => "✗",
-                None => "-",
-            };
-            row.push_str(&format!(" {compile_cell} |"));
-        }
-        if any_quality {
-            let quality_cell = match &r.quality {
-                Some(q) => format!("{:.1} / {:.1}", q.mcp.average(), q.non_mcp.average()),
-                None => "-".to_string(),
-            };
-            row.push_str(&format!(" {quality_cell} |"));
-        }
-        if any_grounding {
-            row.push_str(&format!(" {} |", grounding_matrix_cell(r)));
-        }
-        row.push_str(&format!(" **{}** |\n", r.verdict.winner));
-        out.push_str(&row);
     }
+}
 
-    // Quality breakdown table - shows per-axis scores when any scenario
-    // has been judged. Distinguishes LLM-scored (correctness, usability)
-    // from programmatic (completeness, groundedness, conciseness) axes.
+fn render_matrix_row(
+    out: &mut String,
+    r: &ScenarioReport,
+    any_quality: bool,
+    any_grounding: bool,
+    any_set_comparison: bool,
+    any_compilation_check: bool,
+) {
+    let marker = if r.non_mcp_is_complete { "" } else { " ✱" };
+    let (non_mcp_tok_cell, savings_cell) = if r.non_mcp_is_complete {
+        (
+            format!("{}", r.non_mcp.tokens),
+            format!("{:+.1}%", r.savings.tokens_pct),
+        )
+    } else {
+        ("-".to_string(), "-".to_string())
+    };
+
+    let mut row = format!(
+        "| `{tool}`{marker} | {mcp_tok} | {non_mcp_tok} | {savings} | {mcp_ms:.2} | {non_mcp_ms:.2} | {speedup:.2}× |",
+        tool = r.tool,
+        marker = marker,
+        mcp_tok = r.mcp.tokens,
+        non_mcp_tok = non_mcp_tok_cell,
+        savings = savings_cell,
+        mcp_ms = r.mcp.latency.mean_us / 1000.0,
+        non_mcp_ms = r.non_mcp.latency.mean_us / 1000.0,
+        speedup = r.savings.latency_ratio,
+    );
+
+    if any_set_comparison {
+        let (prec_cell, recall_cell, eff_cell) = match &r.set_comparison {
+            Some(sc) => (
+                format!("{:.2}", sc.precision),
+                format!("{:.2}", sc.recall),
+                r.savings
+                    .effective_savings_pct
+                    .map(|e| format!("{e:+.1}%"))
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            None => ("-".to_string(), "-".to_string(), "-".to_string()),
+        };
+        row.push_str(&format!(" {prec_cell} | {recall_cell} | {eff_cell} |"));
+    }
+    if any_compilation_check {
+        let compile_cell = match &r.compilation_check {
+            Some(c) if c.passed => "✓",
+            Some(_) => "✗",
+            None => "-",
+        };
+        row.push_str(&format!(" {compile_cell} |"));
+    }
     if any_quality {
-        let any_batch = report.scenarios.iter().any(|s| {
-            s.quality
-                .as_ref()
-                .is_some_and(|q| q.flags.contains(&"batch".to_string()))
-        });
-
-        out.push_str("## Quality");
-        if any_batch {
-            out.push_str(" (LLM judge + programmatic)");
-        }
-        out.push_str("\n\n");
-        out.push_str("| Tool | Correctness | Usability | Completeness");
-        if any_batch {
-            out.push('†');
-        }
-        out.push_str(" | Groundedness");
-        if any_batch {
-            out.push('†');
-        }
-        out.push_str(" | Conciseness");
-        if any_batch {
-            out.push('†');
-        }
-        out.push_str(" | Avg |\n");
-        out.push_str("|---|:---:|:---:|:---:|:---:|:---:|:---:|\n");
-        for r in &report.scenarios {
-            if let Some(q) = &r.quality {
-                out.push_str(&format!(
-                    "| `{tool}` | {c_m}/{c_n} | {u_m}/{u_n} | {comp_m}/{comp_n} | {g_m}/{g_n} | {conc_m}/{conc_n} | {avg_m:.1}/{avg_n:.1} |\n",
-                    tool = r.tool,
-                    c_m = q.mcp.correctness, c_n = q.non_mcp.correctness,
-                    u_m = q.mcp.usability, u_n = q.non_mcp.usability,
-                    comp_m = q.mcp.completeness, comp_n = q.non_mcp.completeness,
-                    g_m = q.mcp.groundedness, g_n = q.non_mcp.groundedness,
-                    conc_m = q.mcp.conciseness, conc_n = q.non_mcp.conciseness,
-                    avg_m = q.mcp.average(), avg_n = q.non_mcp.average(),
-                ));
-            }
-        }
-        if any_batch {
-            out.push_str(
-                "\n† Programmatic (not LLM-scored). Correctness and Usability are LLM-scored via single batch call.\n\
-                 Format: MCP/non-MCP.\n",
-            );
-            let n = report
-                .scenarios
-                .iter()
-                .filter(|s| s.quality.is_some())
-                .count();
-            out.push_str(&format!(
-                "\nJudge token budget: ~37,000 tokens (1 batch call, {n} scenarios).\n",
-            ));
-        }
-        out.push('\n');
+        let quality_cell = match &r.quality {
+            Some(q) => format!("{:.1} / {:.1}", q.mcp.average(), q.non_mcp.average()),
+            None => "-".to_string(),
+        };
+        row.push_str(&format!(" {quality_cell} |"));
     }
+    if any_grounding {
+        row.push_str(&format!(" {} |", grounding_matrix_cell(r)));
+    }
+    row.push_str(&format!(" **{}** |\n", r.verdict.winner));
+    out.push_str(&row);
+}
 
-    out.push_str("\n## Per-tool detail\n\n");
+fn render_quality_table(out: &mut String, report: &BenchmarkReport) {
+    let any_batch = report.scenarios.iter().any(|s| {
+        s.quality
+            .as_ref()
+            .is_some_and(|q| q.flags.contains(&"batch".to_string()))
+    });
+
+    out.push_str("## Quality");
+    if any_batch {
+        out.push_str(" (LLM judge + programmatic)");
+    }
+    out.push_str("\n\n");
+    out.push_str("| Tool | Correctness | Usability | Completeness");
+    if any_batch {
+        out.push('†');
+    }
+    out.push_str(" | Groundedness");
+    if any_batch {
+        out.push('†');
+    }
+    out.push_str(" | Conciseness");
+    if any_batch {
+        out.push('†');
+    }
+    out.push_str(" | Avg |\n");
+    out.push_str("|---|:---:|:---:|:---:|:---:|:---:|:---:|\n");
     for r in &report.scenarios {
-        if r.tier > 1 {
-            out.push_str(&format!(
-                "### `{}` - {} (tier {})\n\n",
-                r.tool, r.scenario_id, r.tier,
-            ));
-        } else {
-            out.push_str(&format!("### `{}` - {}\n\n", r.tool, r.scenario_id));
-        }
-        out.push_str(&format!("{}\n\n", r.description));
-
-        out.push_str("**MCP side**\n\n");
-        out.push_str(&format!(
-            "- Args: `{}`\n",
-            r.mcp
-                .args
-                .as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_default()
-        ));
-        out.push_str(&format!(
-            "- Response: {} bytes → {} tokens (naive {})\n",
-            r.mcp.response_bytes, r.mcp.tokens, r.mcp.naive_tokens
-        ));
-        out.push_str(&format!(
-            "- Latency: mean {:.3} ms, p50 {:.3} ms, p95 {:.3} ms, σ {:.3} ms (n={})\n",
-            r.mcp.latency.mean_us / 1000.0,
-            r.mcp.latency.p50_us / 1000.0,
-            r.mcp.latency.p95_us / 1000.0,
-            r.mcp.latency.stdev_us / 1000.0,
-            r.mcp.latency.samples,
-        ));
-        if let Some(err) = &r.mcp.error {
-            out.push_str(&format!("- **ERROR:** `{err}`\n"));
-        }
-
-        out.push_str("\n**Non-MCP side**");
-        if r.non_mcp.reused {
-            out.push_str(" (reused from cache - latency is historical)");
-        }
-        if !r.non_mcp_is_complete {
-            out.push_str(" ✱ **incomplete** - the step sequence below does not produce a comparable answer; byte/token counts are noise, not a measure of efficiency");
-        }
-        out.push_str("\n\n");
-        if let Some(steps) = &r.non_mcp.steps {
-            out.push_str("- Steps:\n");
-            for step in steps {
-                out.push_str(&format!("  - `{step}`\n"));
-            }
-        }
-        out.push_str(&format!(
-            "- Response: {} bytes → {} tokens (naive {})\n",
-            r.non_mcp.response_bytes, r.non_mcp.tokens, r.non_mcp.naive_tokens
-        ));
-        out.push_str(&format!(
-            "- Latency: mean {:.3} ms, p50 {:.3} ms, p95 {:.3} ms, σ {:.3} ms (n={})\n",
-            r.non_mcp.latency.mean_us / 1000.0,
-            r.non_mcp.latency.p50_us / 1000.0,
-            r.non_mcp.latency.p95_us / 1000.0,
-            r.non_mcp.latency.stdev_us / 1000.0,
-            r.non_mcp.latency.samples,
-        ));
-        if let Some(err) = &r.non_mcp.error {
-            out.push_str(&format!("- **ERROR:** `{err}`\n"));
-        }
-
-        if r.non_mcp_is_complete {
-            out.push_str(&format!(
-                "\n**Savings:** {:+.1}% tokens, {:+.1}% bytes, {:.2}× speedup\n\n",
-                r.savings.tokens_pct, r.savings.bytes_pct, r.savings.latency_ratio,
-            ));
-        } else {
-            out.push_str(&format!(
-                "\n**Savings:** - tokens, - bytes, {:.2}× speedup (token comparison skipped: non-MCP sim is incomplete)\n\n",
-                r.savings.latency_ratio,
-            ));
-        }
-
         if let Some(q) = &r.quality {
-            render_per_scenario_quality(&mut out, q);
+            out.push_str(&format!(
+                "| `{tool}` | {c_m}/{c_n} | {u_m}/{u_n} | {comp_m}/{comp_n} | {g_m}/{g_n} | {conc_m}/{conc_n} | {avg_m:.1}/{avg_n:.1} |\n",
+                tool = r.tool,
+                c_m = q.mcp.correctness, c_n = q.non_mcp.correctness,
+                u_m = q.mcp.usability, u_n = q.non_mcp.usability,
+                comp_m = q.mcp.completeness, comp_n = q.non_mcp.completeness,
+                g_m = q.mcp.groundedness, g_n = q.non_mcp.groundedness,
+                conc_m = q.mcp.conciseness, conc_n = q.non_mcp.conciseness,
+                avg_m = q.mcp.average(), avg_n = q.non_mcp.average(),
+            ));
         }
+    }
+    if any_batch {
+        out.push_str(
+            "\n† Programmatic (not LLM-scored). Correctness and Usability are LLM-scored via single batch call.\n\
+             Format: MCP/non-MCP.\n",
+        );
+        let n = report
+            .scenarios
+            .iter()
+            .filter(|s| s.quality.is_some())
+            .count();
+        out.push_str(&format!(
+            "\nJudge token budget: ~37,000 tokens (1 batch call, {n} scenarios).\n",
+        ));
+    }
+    out.push('\n');
+}
 
-        if let Some(ens) = &r.ensemble_quality {
-            render_per_scenario_ensemble(&mut out, ens);
-        }
+fn render_scenario_detail(out: &mut String, r: &ScenarioReport) {
+    if r.tier > 1 {
+        out.push_str(&format!(
+            "### `{}` - {} (tier {})\n\n",
+            r.tool, r.scenario_id, r.tier,
+        ));
+    } else {
+        out.push_str(&format!("### `{}` - {}\n\n", r.tool, r.scenario_id));
+    }
+    out.push_str(&format!("{}\n\n", r.description));
 
-        if r.mcp.grounding.is_some() || r.non_mcp.grounding.is_some() {
-            render_per_scenario_grounding(&mut out, r);
-        }
-
-        out.push_str("**Pros (MCP-only)**\n\n");
-        for p in &r.verdict.pros {
-            out.push_str(&format!("- {p}\n"));
-        }
-        out.push_str("\n**Cons (what MCP loses vs Grep/Read)**\n\n");
-        for c in &r.verdict.cons {
-            out.push_str(&format!("- {c}\n"));
-        }
-        out.push_str(&format!("\n**Verdict:** {}\n\n", r.verdict.summary));
-        out.push_str("---\n\n");
+    out.push_str("**MCP side**\n\n");
+    out.push_str(&format!(
+        "- Args: `{}`\n",
+        r.mcp
+            .args
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "- Response: {} bytes → {} tokens (naive {})\n",
+        r.mcp.response_bytes, r.mcp.tokens, r.mcp.naive_tokens
+    ));
+    out.push_str(&format!(
+        "- Latency: mean {:.3} ms, p50 {:.3} ms, p95 {:.3} ms, σ {:.3} ms (n={})\n",
+        r.mcp.latency.mean_us / 1000.0,
+        r.mcp.latency.p50_us / 1000.0,
+        r.mcp.latency.p95_us / 1000.0,
+        r.mcp.latency.stdev_us / 1000.0,
+        r.mcp.latency.samples,
+    ));
+    if let Some(err) = &r.mcp.error {
+        out.push_str(&format!("- **ERROR:** `{err}`\n"));
     }
 
-    out
+    out.push_str("\n**Non-MCP side**");
+    if r.non_mcp.reused {
+        out.push_str(" (reused from cache - latency is historical)");
+    }
+    if !r.non_mcp_is_complete {
+        out.push_str(" ✱ **incomplete** - the step sequence below does not produce a comparable answer; byte/token counts are noise, not a measure of efficiency");
+    }
+    out.push_str("\n\n");
+    if let Some(steps) = &r.non_mcp.steps {
+        out.push_str("- Steps:\n");
+        for step in steps {
+            out.push_str(&format!("  - `{step}`\n"));
+        }
+    }
+    out.push_str(&format!(
+        "- Response: {} bytes → {} tokens (naive {})\n",
+        r.non_mcp.response_bytes, r.non_mcp.tokens, r.non_mcp.naive_tokens
+    ));
+    out.push_str(&format!(
+        "- Latency: mean {:.3} ms, p50 {:.3} ms, p95 {:.3} ms, σ {:.3} ms (n={})\n",
+        r.non_mcp.latency.mean_us / 1000.0,
+        r.non_mcp.latency.p50_us / 1000.0,
+        r.non_mcp.latency.p95_us / 1000.0,
+        r.non_mcp.latency.stdev_us / 1000.0,
+        r.non_mcp.latency.samples,
+    ));
+    if let Some(err) = &r.non_mcp.error {
+        out.push_str(&format!("- **ERROR:** `{err}`\n"));
+    }
+
+    if r.non_mcp_is_complete {
+        out.push_str(&format!(
+            "\n**Savings:** {:+.1}% tokens, {:+.1}% bytes, {:.2}× speedup\n\n",
+            r.savings.tokens_pct, r.savings.bytes_pct, r.savings.latency_ratio,
+        ));
+    } else {
+        out.push_str(&format!(
+            "\n**Savings:** - tokens, - bytes, {:.2}× speedup (token comparison skipped: non-MCP sim is incomplete)\n\n",
+            r.savings.latency_ratio,
+        ));
+    }
+
+    if let Some(q) = &r.quality {
+        render_per_scenario_quality(out, q);
+    }
+
+    if let Some(ens) = &r.ensemble_quality {
+        render_per_scenario_ensemble(out, ens);
+    }
+
+    if r.mcp.grounding.is_some() || r.non_mcp.grounding.is_some() {
+        render_per_scenario_grounding(out, r);
+    }
+
+    out.push_str("**Pros (MCP-only)**\n\n");
+    for p in &r.verdict.pros {
+        out.push_str(&format!("- {p}\n"));
+    }
+    out.push_str("\n**Cons (what MCP loses vs Grep/Read)**\n\n");
+    for c in &r.verdict.cons {
+        out.push_str(&format!("- {c}\n"));
+    }
+    out.push_str(&format!("\n**Verdict:** {}\n\n", r.verdict.summary));
+    out.push_str("---\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,18 +1312,6 @@ pub fn check_regression(
     findings
 }
 
-fn git_sha() -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
 /// Threshold above which a per-tool savings range across languages is
 /// considered "high divergence" and surfaces in section 3 of the
 /// cross-language summary. 20 percentage points is roughly 4× the per-row
@@ -1559,8 +1584,8 @@ fn parse_files_symbols(preview: &str) -> (Option<usize>, Option<usize>) {
 /// `typescript`. The fixture-specific name (e.g. `zod`, `httpx`,
 /// `cobra`, `jackson-core`) is then derived from a hard-coded table
 /// - Wave 2 fixtures are pinned in `benchmarks/fixtures.toml` and only
-/// change when the team explicitly bumps them, so a static map is the
-/// least-fragile place to store the mapping.
+///   change when the team explicitly bumps them, so a static map is the
+///   least-fragile place to store the mapping.
 fn fixture_name_for(label: &str, r: &BenchmarkReport) -> String {
     let lang = r.language.as_str();
     let key = if !lang.is_empty() && lang != "rust" {

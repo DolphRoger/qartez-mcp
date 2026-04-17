@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.0] - 2026-04-17
+
+### Changed
+
+- **MSRV raised to 1.88** (from 1.85) - transitive deps (`time-core 0.1.8` via `rusqlite 0.39`, `darling 0.23` via `rmcp-macros`) now require rustc 1.88. The installer auto-updates rustup-managed toolchains; users on older pinned toolchains will see a clear upgrade message.
+
+### Added
+
+- **CI supply-chain hardening** - `cargo-audit` on every dep change, `cargo-deny` license/source allowlist (`deny.toml`), OpenSSF Scorecard workflow, and Dependabot coverage for Cargo + GitHub Actions. All workflows SHA-pinned.
+
+### Fixed
+
+- **Security scanner cfg(test) filter** - switched from line-based brace counting to tree-sitter AST detection, correctly excluding symbols inside inline `#[cfg(test)] mod tests { ... }` blocks even when strings, lifetimes, or raw strings contain braces.
+- **SEC001 shell-variable false positives** - hardcoded-secret detection no longer flags `"$VAR"` expansions.
+- **SEC007 allowlist** - insecure-URL scanner now exempts `xmlns:` namespace declarations and single-label/internal hostnames (Docker, K8s configs) to cut noise on legitimate LAN/cluster references.
+- **`is_test_path` substring matching** - path is normalized before matching so platform path separators do not cause misclassification.
+- **`qartez_test_gaps` inline `#[cfg(test)]` coverage** - modules defined inline are now counted as test coverage in both `report` and `suggest` modes; `suggest` previously missed them.
+- **`qartez_find` kind filter + regex** - in `regex` mode, `kind` filter is now applied before the result `limit`, so requesting e.g. `kind="struct"` with `limit=100` no longer returns zero matches when the first 100 regex hits are other kinds. User regexes are also capped at a 1 MiB compiled-program size (matching the security-scanner regex cap) to guard against pathological patterns.
+- **Setup IDE detection** - `qartez-setup` now finds IDE CLIs installed outside `PATH` (including VS Code extension installs) instead of skipping them silently.
+- **Helper correctness** - guarded `replace_whole_word` boundary checks, fixed Rust self-import handling at crate root, tightened retry symmetry in batch judge, deduplicated `git_sha` lookups, and removed unreachable `unwrap`s in whole-word replace.
+
 ## [0.5.1] - 2026-04-16
 
 ### Fixed

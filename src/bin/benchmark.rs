@@ -24,7 +24,7 @@ use clap::Parser;
 use std::collections::HashMap;
 
 use qartez_mcp::benchmark::{
-    BenchmarkRunner, LatencyConfig, build_non_mcp_cache, grounding, judge, profiles,
+    BenchmarkRunner, LatencyConfig, build_non_mcp_cache, git_sha, grounding, judge, profiles,
     report::{self, BenchmarkReport, ScenarioReport},
     targets,
 };
@@ -330,37 +330,7 @@ fn main() -> Result<()> {
         .with_grounding_enabled(effective_grounding);
 
     if let Some(cache_path) = &cli.reuse_non_mcp {
-        let text = std::fs::read_to_string(cache_path)
-            .with_context(|| format!("read non-mcp cache {}", cache_path.display()))?;
-        let prior: BenchmarkReport =
-            serde_json::from_str(&text).context("parse cached benchmark json")?;
-        let current_sha = current_git_sha();
-        let expected = if cli.allow_stale_cache {
-            None
-        } else {
-            current_sha.as_deref()
-        };
-        let cache = build_non_mcp_cache(&prior, expected);
-        if cache.is_empty() {
-            if cli.allow_stale_cache {
-                eprintln!(
-                    "warning: cache at {} contained no usable entries",
-                    cache_path.display()
-                );
-            } else {
-                anyhow::bail!(
-                    "cache at {} has git SHA {:?} but current is {:?}; pass --allow-stale-cache to force",
-                    cache_path.display(),
-                    prior.git_sha,
-                    current_sha,
-                );
-            }
-        }
-        println!(
-            "Reusing non-MCP side from {} ({} scenarios cached)",
-            cache_path.display(),
-            cache.len()
-        );
+        let cache = load_non_mcp_cache(cache_path, cli.allow_stale_cache)?;
         runner = runner.with_non_mcp_cache(cache);
     }
 
@@ -372,145 +342,12 @@ fn main() -> Result<()> {
         runner.run_all_with_tier(&resolved_targets, profile, cli.filter.as_deref(), cli.tier);
     println!("Completed {} scenario(s).", scenarios.len());
 
-    let judge_cache: Option<HashMap<String, judge::CachedJudge>> = if let Some(cache_path) =
-        &cli.reuse_judge
-    {
-        let text = std::fs::read_to_string(cache_path)
-            .with_context(|| format!("read judge cache {}", cache_path.display()))?;
-        let prior: BenchmarkReport =
-            serde_json::from_str(&text).context("parse cached judge benchmark json")?;
-        let current_sha = current_git_sha();
-        let expected = if cli.allow_stale_judge_cache {
-            None
-        } else {
-            current_sha.as_deref()
-        };
-        let cache = judge::build_judge_cache(&prior, expected, cli.allow_stale_judge_cache);
-        if cache.is_empty() {
-            if cli.allow_stale_judge_cache {
-                eprintln!(
-                    "warning: judge cache at {} contained no usable entries",
-                    cache_path.display()
-                );
-            } else {
-                anyhow::bail!(
-                    "judge cache at {} has git SHA {:?} but current is {:?}; pass --allow-stale-judge-cache to force",
-                    cache_path.display(),
-                    prior.git_sha,
-                    current_sha,
-                );
-            }
-        }
-        println!(
-            "Reusing judge verdicts from {} ({} scenarios cached)",
-            cache_path.display(),
-            cache.len()
-        );
-        Some(cache)
-    } else {
-        None
+    let judge_cache: Option<HashMap<String, judge::CachedJudge>> = match &cli.reuse_judge {
+        Some(cache_path) => Some(load_judge_cache(cache_path, cli.allow_stale_judge_cache)?),
+        None => None,
     };
 
-    // Batch judge is the default when --judge is set and --judge-legacy is not.
-    let use_batch_judge = cli.judge && !cli.judge_legacy && !cli.judge_ensemble;
-
-    if use_batch_judge {
-        let scenario_refs: Vec<&report::ScenarioReport> = scenarios.iter().collect();
-        println!(
-            "Scoring {} scenario(s) with batch judge (`{}`, 1 LLM call)…",
-            scenarios.len(),
-            cli.judge_model,
-        );
-        match judge::score_batch(&scenario_refs, &cli.judge_model) {
-            Ok(scores) => {
-                for (i, q) in scores.into_iter().enumerate() {
-                    scenarios[i].quality = Some(q);
-                }
-                let scored = scenarios.iter().filter(|s| s.quality.is_some()).count();
-                println!(
-                    "Batch judge finished: {scored}/{} scenario(s) scored.",
-                    scenarios.len()
-                );
-            }
-            Err(e) => {
-                eprintln!("Batch judge failed: {e:#}. Falling back to per-scenario judge.");
-                let workers = cli.judge_workers.max(1);
-                let n = cli.judge_n.max(1);
-                run_judge(
-                    &mut scenarios,
-                    &cli.judge_model,
-                    workers,
-                    n,
-                    judge_cache.as_ref(),
-                    cli.allow_stale_judge_cache,
-                );
-            }
-        }
-    } else if cli.judge && cli.judge_ensemble {
-        let workers = cli.judge_workers.max(1);
-        let n = cli.judge_n.max(1);
-        let calls_no_arbitration = 2 * 2 * n;
-        println!(
-            "Scoring {} scenario(s) with ensemble judge (primary `{}`, secondary `{}`, arbiter `{}`, τ={:.1}, `claude -p` × {} per scenario, {} worker(s))…",
-            scenarios.len(),
-            cli.judge_model,
-            cli.judge_model_secondary,
-            cli.judge_arbiter,
-            cli.judge_disagreement_threshold,
-            calls_no_arbitration,
-            workers,
-        );
-        run_judge_ensemble(
-            &mut scenarios,
-            &cli.judge_model,
-            &cli.judge_model_secondary,
-            &cli.judge_arbiter,
-            cli.judge_disagreement_threshold,
-            workers,
-            n,
-            judge_cache.as_ref(),
-            cli.allow_stale_judge_cache,
-        );
-        let scored = scenarios
-            .iter()
-            .filter(|s| s.ensemble_quality.is_some())
-            .count();
-        let arbitrated = scenarios
-            .iter()
-            .filter(|s| {
-                s.ensemble_quality
-                    .as_ref()
-                    .is_some_and(|e| e.arbiter.is_some())
-            })
-            .count();
-        println!(
-            "Judge ensemble finished: {scored}/{} scenario(s) scored ({arbitrated} required arbitration).",
-            scenarios.len()
-        );
-    } else if cli.judge {
-        let workers = cli.judge_workers.max(1);
-        let n = cli.judge_n.max(1);
-        println!(
-            "Scoring {} scenario(s) with `{}` via judge (`claude -p` × {}, {} worker(s))…",
-            scenarios.len(),
-            cli.judge_model,
-            2 * n,
-            workers,
-        );
-        run_judge(
-            &mut scenarios,
-            &cli.judge_model,
-            workers,
-            n,
-            judge_cache.as_ref(),
-            cli.allow_stale_judge_cache,
-        );
-        let scored = scenarios.iter().filter(|s| s.quality.is_some()).count();
-        println!(
-            "Judge finished: {scored}/{} scenario(s) scored.",
-            scenarios.len()
-        );
-    }
+    run_scoring(&cli, &mut scenarios, judge_cache.as_ref());
 
     let report = BenchmarkReport::new_with_language(scenarios, profile.name.to_string());
 
@@ -550,6 +387,192 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn load_non_mcp_cache(
+    cache_path: &Path,
+    allow_stale: bool,
+) -> Result<HashMap<String, report::SideReport>> {
+    let text = std::fs::read_to_string(cache_path)
+        .with_context(|| format!("read non-mcp cache {}", cache_path.display()))?;
+    let prior: BenchmarkReport =
+        serde_json::from_str(&text).context("parse cached benchmark json")?;
+    let current_sha = git_sha();
+    let expected = if allow_stale {
+        None
+    } else {
+        current_sha.as_deref()
+    };
+    let cache = build_non_mcp_cache(&prior, expected);
+    if cache.is_empty() {
+        if allow_stale {
+            eprintln!(
+                "warning: cache at {} contained no usable entries",
+                cache_path.display()
+            );
+        } else {
+            anyhow::bail!(
+                "cache at {} has git SHA {:?} but current is {:?}; pass --allow-stale-cache to force",
+                cache_path.display(),
+                prior.git_sha,
+                current_sha,
+            );
+        }
+    }
+    println!(
+        "Reusing non-MCP side from {} ({} scenarios cached)",
+        cache_path.display(),
+        cache.len()
+    );
+    Ok(cache)
+}
+
+fn load_judge_cache(
+    cache_path: &Path,
+    allow_stale: bool,
+) -> Result<HashMap<String, judge::CachedJudge>> {
+    let text = std::fs::read_to_string(cache_path)
+        .with_context(|| format!("read judge cache {}", cache_path.display()))?;
+    let prior: BenchmarkReport =
+        serde_json::from_str(&text).context("parse cached judge benchmark json")?;
+    let current_sha = git_sha();
+    let expected = if allow_stale {
+        None
+    } else {
+        current_sha.as_deref()
+    };
+    let cache = judge::build_judge_cache(&prior, expected, allow_stale);
+    if cache.is_empty() {
+        if allow_stale {
+            eprintln!(
+                "warning: judge cache at {} contained no usable entries",
+                cache_path.display()
+            );
+        } else {
+            anyhow::bail!(
+                "judge cache at {} has git SHA {:?} but current is {:?}; pass --allow-stale-judge-cache to force",
+                cache_path.display(),
+                prior.git_sha,
+                current_sha,
+            );
+        }
+    }
+    println!(
+        "Reusing judge verdicts from {} ({} scenarios cached)",
+        cache_path.display(),
+        cache.len()
+    );
+    Ok(cache)
+}
+
+fn run_scoring(
+    cli: &Cli,
+    scenarios: &mut [report::ScenarioReport],
+    judge_cache: Option<&HashMap<String, judge::CachedJudge>>,
+) {
+    let use_batch_judge = cli.judge && !cli.judge_legacy && !cli.judge_ensemble;
+
+    if use_batch_judge {
+        let scenario_refs: Vec<&report::ScenarioReport> = scenarios.iter().collect();
+        println!(
+            "Scoring {} scenario(s) with batch judge (`{}`, 1 LLM call)…",
+            scenarios.len(),
+            cli.judge_model,
+        );
+        match judge::score_batch(&scenario_refs, &cli.judge_model) {
+            Ok(scores) => {
+                for (i, q) in scores.into_iter().enumerate() {
+                    scenarios[i].quality = Some(q);
+                }
+                let scored = scenarios.iter().filter(|s| s.quality.is_some()).count();
+                println!(
+                    "Batch judge finished: {scored}/{} scenario(s) scored.",
+                    scenarios.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("Batch judge failed: {e:#}. Falling back to per-scenario judge.");
+                let workers = cli.judge_workers.max(1);
+                let n = cli.judge_n.max(1);
+                run_judge(
+                    scenarios,
+                    JudgeRunConfig {
+                        model: &cli.judge_model,
+                        workers,
+                        n,
+                        cache: judge_cache,
+                        allow_stale: cli.allow_stale_judge_cache,
+                    },
+                );
+            }
+        }
+    } else if cli.judge && cli.judge_ensemble {
+        let workers = cli.judge_workers.max(1);
+        let n = cli.judge_n.max(1);
+        let calls_no_arbitration = 2 * 2 * n;
+        println!(
+            "Scoring {} scenario(s) with ensemble judge (primary `{}`, secondary `{}`, arbiter `{}`, τ={:.1}, `claude -p` × {} per scenario, {} worker(s))…",
+            scenarios.len(),
+            cli.judge_model,
+            cli.judge_model_secondary,
+            cli.judge_arbiter,
+            cli.judge_disagreement_threshold,
+            calls_no_arbitration,
+            workers,
+        );
+        run_judge_ensemble(
+            scenarios,
+            &cli.judge_model,
+            &cli.judge_model_secondary,
+            &cli.judge_arbiter,
+            cli.judge_disagreement_threshold,
+            workers,
+            n,
+            judge_cache,
+            cli.allow_stale_judge_cache,
+        );
+        let scored = scenarios
+            .iter()
+            .filter(|s| s.ensemble_quality.is_some())
+            .count();
+        let arbitrated = scenarios
+            .iter()
+            .filter(|s| {
+                s.ensemble_quality
+                    .as_ref()
+                    .is_some_and(|e| e.arbiter.is_some())
+            })
+            .count();
+        println!(
+            "Judge ensemble finished: {scored}/{} scenario(s) scored ({arbitrated} required arbitration).",
+            scenarios.len()
+        );
+    } else if cli.judge {
+        let workers = cli.judge_workers.max(1);
+        let n = cli.judge_n.max(1);
+        println!(
+            "Scoring {} scenario(s) with `{}` via judge (`claude -p` × {}, {} worker(s))…",
+            scenarios.len(),
+            cli.judge_model,
+            2 * n,
+            workers,
+        );
+        run_judge(
+            scenarios,
+            JudgeRunConfig {
+                model: &cli.judge_model,
+                workers,
+                n,
+                cache: judge_cache,
+                allow_stale: cli.allow_stale_judge_cache,
+            },
+        );
+        let scored = scenarios.iter().filter(|s| s.quality.is_some()).count();
+        println!(
+            "Judge finished: {scored}/{} scenario(s) scored.",
+            scenarios.len()
+        );
+    }
+}
+
 fn compare_against_baseline(
     current: &BenchmarkReport,
     baseline_path: &Path,
@@ -582,18 +605,6 @@ fn compare_against_baseline(
         );
     }
     anyhow::bail!("{} regression(s) detected", findings.len())
-}
-
-fn current_git_sha() -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
 }
 
 /// Loads every `reports/benchmark*.json` sibling file from `reports_dir`,
@@ -814,15 +825,26 @@ fn run_judge_parallel<T: Send>(
         .collect()
 }
 
-/// Scores every scenario with the judge protocol in parallel.
-fn run_judge(
-    scenarios: &mut [ScenarioReport],
-    model: &str,
+/// Configuration for a single-judge scoring run.
+#[derive(Debug, Clone, Copy)]
+struct JudgeRunConfig<'a> {
+    model: &'a str,
     workers: usize,
     n: usize,
-    cache: Option<&HashMap<String, judge::CachedJudge>>,
+    cache: Option<&'a HashMap<String, judge::CachedJudge>>,
     allow_stale: bool,
-) {
+}
+
+/// Scores every scenario with the judge protocol in parallel.
+fn run_judge(scenarios: &mut [ScenarioReport], config: JudgeRunConfig<'_>) {
+    let JudgeRunConfig {
+        model,
+        workers,
+        n,
+        cache,
+        allow_stale,
+    } = config;
+
     let results = run_judge_parallel(scenarios, workers, |scenario, _idx| {
         if let Some(c) = cache
             && let Some(cached) = judge::lookup_judge_cache(c, scenario, allow_stale)

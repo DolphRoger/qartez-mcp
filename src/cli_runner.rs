@@ -241,7 +241,7 @@ fn print_human(w: &mut impl Write, output: &str) -> Result<()> {
         } else if line.starts_with("---") || line.starts_with("===") {
             writeln!(w, "{}", separator_style.apply_to(line))?;
         } else {
-            writeln!(w, "{}", line)?;
+            writeln!(w, "{line}")?;
         }
     }
     Ok(())

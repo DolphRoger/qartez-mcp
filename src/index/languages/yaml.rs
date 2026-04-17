@@ -1,6 +1,7 @@
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::node_text;
 use crate::index::symbols::{
     ExtractedImport, ExtractedReference, ExtractedSymbol, ParseResult, ReferenceKind, SymbolKind,
 };
@@ -947,14 +948,6 @@ fn scalar_text(node: Node, source: &[u8]) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
 }
 
 #[cfg(test)]

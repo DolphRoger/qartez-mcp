@@ -393,11 +393,7 @@ fn validate_axis_anchor(value: u8, axis: &str, side: &str) -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!(
-            "judge emitted score {} on axis `{}` (side `{}`); must be one of {:?}",
-            value,
-            axis,
-            side,
-            AXIS_ANCHORS
+            "judge emitted score {value} on axis `{axis}` (side `{side}`); must be one of {AXIS_ANCHORS:?}"
         )
     }
 }
@@ -1493,6 +1489,7 @@ pub fn score_ensemble_scenario_with_primary(
 ///   * `p_e == 1.0` (both raters scored every pair identically) → `1.0`.
 ///   * Any out-of-range rating (value >= `k`) → [`f64::NAN`] rather
 ///     than panicking.
+#[allow(clippy::needless_range_loop)]
 pub fn cohens_weighted_kappa(pairs: &[(u8, u8)], k: usize) -> f64 {
     if pairs.len() < 2 || k < 2 {
         return f64::NAN;
@@ -1839,11 +1836,21 @@ fn run_batch_judge_subprocess(prompt: &str, model: &str) -> Result<String> {
                 Some(s) => s,
                 None => {
                     last_error = Some(anyhow::anyhow!("claude child missing stdin pipe"));
+                    if attempt + 1 < RETRY_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            RETRY_BACKOFF_MS[attempt as usize],
+                        ));
+                    }
                     continue;
                 }
             };
             if let Err(e) = stdin.write_all(prompt.as_bytes()) {
                 last_error = Some(anyhow::Error::new(e).context("write batch prompt to stdin"));
+                if attempt + 1 < RETRY_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        RETRY_BACKOFF_MS[attempt as usize],
+                    ));
+                }
                 continue;
             }
         }
@@ -1852,6 +1859,11 @@ fn run_batch_judge_subprocess(prompt: &str, model: &str) -> Result<String> {
             Ok(out) => out,
             Err(e) => {
                 last_error = Some(anyhow::Error::new(e).context("wait on batch `claude -p`"));
+                if attempt + 1 < RETRY_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        RETRY_BACKOFF_MS[attempt as usize],
+                    ));
+                }
                 continue;
             }
         };
@@ -2038,6 +2050,70 @@ mod tests {
     fn truncate_for_judge_skips_short_input() {
         let s = "hello";
         assert_eq!(truncate_for_judge(s), "hello");
+    }
+
+    /// Guarantees that `run_batch_judge_subprocess` keeps the same retry-backoff
+    /// discipline as its sibling `run_judge_subprocess`. Every `continue` inside
+    /// the retry loop must be paired with a `RETRY_BACKOFF_MS[attempt as usize]`
+    /// sleep, so the count of sleeps must equal the count of `continue`
+    /// statements inside each function body.
+    #[test]
+    fn batch_judge_retry_sleeps_match_sibling() {
+        let source = include_str!("judge.rs");
+
+        let sibling = extract_fn_body(source, "fn run_judge_subprocess(");
+        let batch = extract_fn_body(source, "fn run_batch_judge_subprocess(");
+
+        let sibling_continues = sibling.matches("continue;").count();
+        let sibling_sleeps = sibling
+            .matches("RETRY_BACKOFF_MS[attempt as usize]")
+            .count();
+        let batch_continues = batch.matches("continue;").count();
+        let batch_sleeps = batch.matches("RETRY_BACKOFF_MS[attempt as usize]").count();
+
+        assert_eq!(
+            sibling_continues, sibling_sleeps,
+            "run_judge_subprocess should sleep before every continue \
+             (continues={sibling_continues}, sleeps={sibling_sleeps})"
+        );
+        assert_eq!(
+            batch_continues, batch_sleeps,
+            "run_batch_judge_subprocess should sleep before every continue \
+             (continues={batch_continues}, sleeps={batch_sleeps})"
+        );
+        assert_eq!(
+            sibling_continues, batch_continues,
+            "retry structure diverged between sibling and batch judge subprocess"
+        );
+    }
+
+    /// Extract the textual body of a function beginning with `signature_prefix`
+    /// by balancing braces starting at the first `{` after the prefix.
+    fn extract_fn_body<'a>(source: &'a str, signature_prefix: &str) -> &'a str {
+        let start = source
+            .find(signature_prefix)
+            .unwrap_or_else(|| panic!("signature not found: {signature_prefix}"));
+        let open = source[start..]
+            .find('{')
+            .map(|o| start + o)
+            .expect("opening brace for function body");
+        let bytes = source.as_bytes();
+        let mut depth: i32 = 0;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..=i];
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced braces after {signature_prefix}");
     }
 
     // -- test helpers -----------------------------------------------------

@@ -189,10 +189,12 @@ fn execute_step(
             ext_filter,
         } => impact_bfs(
             root,
-            seed,
-            *depth,
-            ext_filter.as_deref(),
-            opts.exclude_globs,
+            ImpactBfsConfig {
+                seed,
+                depth: *depth,
+                ext_filter: ext_filter.as_deref(),
+                exclude_globs: opts.exclude_globs,
+            },
             out,
         ),
         SimStep::GitCoChange {
@@ -203,20 +205,28 @@ fn execute_step(
     }
 }
 
+/// Inputs that control the seeded BFS traversal.
+#[derive(Debug, Clone, Copy)]
+struct ImpactBfsConfig<'a> {
+    seed: &'a str,
+    depth: u32,
+    ext_filter: Option<&'a [String]>,
+    exclude_globs: &'a [&'a str],
+}
+
 /// Seeded BFS over crate-level imports. Starts from `seed` (typically
 /// the module path of the target file), greps `use crate::{seed}` to
 /// find direct importers, then for each importer derives its own crate
 /// stem and greps for that, recursing up to `depth` levels. Result bytes
 /// represent what a non-MCP agent would actually see while chasing
 /// transitive blast radius.
-fn impact_bfs(
-    root: &Path,
-    seed: &str,
-    depth: u32,
-    ext_filter: Option<&[String]>,
-    exclude_globs: &[&str],
-    out: &mut String,
-) -> Result<(), SimError> {
+fn impact_bfs(root: &Path, config: ImpactBfsConfig<'_>, out: &mut String) -> Result<(), SimError> {
+    let ImpactBfsConfig {
+        seed,
+        depth,
+        ext_filter,
+        exclude_globs,
+    } = config;
     let files = walk_files(root, ext_filter, exclude_globs);
     let mut contents: HashMap<PathBuf, String> = HashMap::new();
     for f in &files {
@@ -389,4 +399,156 @@ fn walk_files(root: &Path, ext_filter: Option<&[String]>, exclude_globs: &[&str]
         })
         .map(|entry| entry.into_path())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create dir");
+        }
+        fs::write(path, content).expect("write file");
+    }
+
+    #[test]
+    fn impact_bfs_finds_direct_importer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(
+            &root.join("src/lib.rs"),
+            "pub mod target;\npub mod importer;\n",
+        );
+        write(&root.join("src/target.rs"), "pub fn hit() {}\n");
+        write(
+            &root.join("src/importer.rs"),
+            "use crate::target;\npub fn caller() { target::hit(); }\n",
+        );
+
+        let exts = vec!["rs".to_string()];
+        let mut out = String::new();
+        impact_bfs(
+            root,
+            ImpactBfsConfig {
+                seed: "target",
+                depth: 1,
+                ext_filter: Some(&exts),
+                exclude_globs: &[],
+            },
+            &mut out,
+        )
+        .expect("impact_bfs ok");
+
+        assert!(
+            out.contains("importer.rs"),
+            "expected direct importer in output, got: {out}"
+        );
+        assert!(
+            out.contains("use crate::target"),
+            "expected the matching import line, got: {out}"
+        );
+    }
+
+    #[test]
+    fn impact_bfs_respects_depth_limit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(&root.join("src/target.rs"), "pub fn hit() {}\n");
+        write(&root.join("src/level1.rs"), "use crate::target;\n");
+        write(&root.join("src/level2.rs"), "use crate::level1;\n");
+
+        let exts = vec!["rs".to_string()];
+
+        let mut depth_1 = String::new();
+        impact_bfs(
+            root,
+            ImpactBfsConfig {
+                seed: "target",
+                depth: 1,
+                ext_filter: Some(&exts),
+                exclude_globs: &[],
+            },
+            &mut depth_1,
+        )
+        .expect("bfs depth 1");
+
+        let mut depth_2 = String::new();
+        impact_bfs(
+            root,
+            ImpactBfsConfig {
+                seed: "target",
+                depth: 2,
+                ext_filter: Some(&exts),
+                exclude_globs: &[],
+            },
+            &mut depth_2,
+        )
+        .expect("bfs depth 2");
+
+        assert!(depth_1.contains("level1.rs"));
+        assert!(!depth_1.contains("level2.rs"), "depth=1 must not recurse");
+        assert!(depth_2.contains("level1.rs"));
+        assert!(depth_2.contains("level2.rs"), "depth=2 must recurse once");
+    }
+
+    #[test]
+    fn impact_bfs_respects_exclude_globs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(&root.join("src/real.rs"), "use crate::target;\n");
+        write(&root.join("vendor/ignored.rs"), "use crate::target;\n");
+
+        let exts = vec!["rs".to_string()];
+        let excludes: &[&str] = &["vendor/**"];
+
+        let mut out = String::new();
+        impact_bfs(
+            root,
+            ImpactBfsConfig {
+                seed: "target",
+                depth: 1,
+                ext_filter: Some(&exts),
+                exclude_globs: excludes,
+            },
+            &mut out,
+        )
+        .expect("bfs ok");
+
+        assert!(out.contains("real.rs"));
+        assert!(
+            !out.contains("ignored.rs"),
+            "vendor dir must be excluded, got: {out}"
+        );
+    }
+
+    #[test]
+    fn impact_bfs_depth_zero_emits_level_zero_only() {
+        // With the `level + 1 < depth` recursion gate, depth=0 still
+        // surfaces direct importers of the seed but never enqueues the
+        // next level. This lock-step preserves the pre-refactor behavior.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(&root.join("src/direct.rs"), "use crate::target;\n");
+        write(&root.join("src/indirect.rs"), "use crate::direct;\n");
+
+        let exts = vec!["rs".to_string()];
+        let mut out = String::new();
+        impact_bfs(
+            root,
+            ImpactBfsConfig {
+                seed: "target",
+                depth: 0,
+                ext_filter: Some(&exts),
+                exclude_globs: &[],
+            },
+            &mut out,
+        )
+        .expect("bfs ok");
+        assert!(out.contains("direct.rs"), "direct importer still surfaces");
+        assert!(
+            !out.contains("indirect.rs"),
+            "depth=0 must not recurse to level 1: {out}"
+        );
+    }
 }

@@ -1,6 +1,7 @@
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::{children, node_text};
 use crate::index::symbols::{ExtractedSymbol, ParseResult, SymbolKind};
 
 pub struct NginxSupport;
@@ -29,10 +30,6 @@ impl LanguageSupport for NginxSupport {
             ..Default::default()
         }
     }
-}
-
-fn children(node: Node) -> impl Iterator<Item = Node> {
-    (0..node.child_count() as u32).filter_map(move |i| node.child(i))
 }
 
 /// Walk the AST produced by tree-sitter-nginx v1.x.
@@ -169,14 +166,6 @@ fn find_inner_value(node: Node, keyword: &str, source: &[u8]) -> Option<String> 
         }
     }
     None
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
 }
 
 #[cfg(test)]

@@ -106,6 +106,143 @@ fn root_prefix(root: &Path) -> String {
         .unwrap_or_else(|| "root".to_string())
 }
 
+/// How an existing DB row for the same path should be reconciled before the
+/// re-index writes fresh content.
+enum ExistingFileStrategy {
+    /// Drop everything (symbols, outgoing edges, AND incoming edges).
+    /// Used by full re-index where every file is being replaced anyway.
+    DeleteAll,
+    /// Drop only the file's own derived content (symbols, outgoing edges)
+    /// while preserving incoming edges. Used by incremental re-index so
+    /// unchanged files keep pointing at the now-rewritten file.
+    ClearContentOnly,
+}
+
+/// Common per-file ingestion: count lines, clear stale rows, upsert the
+/// `files` row, write symbols and type relations, and append a tracking
+/// entry to `indexed`. Returns the number of symbols inserted so callers
+/// can log progress without re-walking the parse result.
+#[allow(clippy::too_many_arguments)]
+fn ingest_parsed_file(
+    tx: &Connection,
+    rel_path: String,
+    raw_rel: String,
+    mtime_ns: i64,
+    size_bytes: i64,
+    source: &[u8],
+    parse_result: symbols::ParseResult,
+    language: String,
+    strategy: ExistingFileStrategy,
+    indexed: &mut Vec<IndexedFile>,
+) -> Result<usize> {
+    let newline_count = source.iter().filter(|&&b| b == b'\n').count();
+    let line_count = if source.last() == Some(&b'\n') || source.is_empty() {
+        newline_count as i64
+    } else {
+        newline_count as i64 + 1
+    };
+
+    if let Some(existing) = read::get_file_by_path(tx, &rel_path)? {
+        match strategy {
+            ExistingFileStrategy::DeleteAll => write::delete_file_data(tx, existing.id)?,
+            ExistingFileStrategy::ClearContentOnly => write::clear_file_content(tx, existing.id)?,
+        }
+    }
+
+    let file_id = write::upsert_file(tx, &rel_path, mtime_ns, size_bytes, &language, line_count)?;
+
+    let symbol_inserts: Vec<SymbolInsert> = parse_result
+        .symbols
+        .iter()
+        .map(|s| SymbolInsert {
+            name: s.name.clone(),
+            kind: s.kind.as_str().to_string(),
+            line_start: s.line_start,
+            line_end: s.line_end,
+            signature: s.signature.clone(),
+            is_exported: s.is_exported,
+            shape_hash: compute_shape_hash(source, s.line_start, s.line_end),
+            unused_excluded: s.unused_excluded,
+            parent_idx: s.parent_idx,
+            complexity: s.complexity,
+            owner_type: s.owner_type.clone(),
+        })
+        .collect();
+    let inserted = symbol_inserts.len();
+
+    let symbol_ids = write::insert_symbols(tx, file_id, &symbol_inserts)?;
+
+    if !parse_result.type_relations.is_empty() {
+        let tuples: Vec<_> = parse_result
+            .type_relations
+            .iter()
+            .map(|r| {
+                (
+                    r.sub_name.clone(),
+                    r.super_name.clone(),
+                    r.kind.as_str().to_string(),
+                    r.line,
+                )
+            })
+            .collect();
+        write::insert_type_relations(tx, file_id, &tuples)?;
+    }
+
+    indexed.push(IndexedFile {
+        file_id,
+        rel_path,
+        raw_rel,
+        language,
+        imports: parse_result.imports,
+        symbol_ids,
+        references: parse_result.references,
+    });
+
+    Ok(inserted)
+}
+
+/// Resolve every entry's import specifiers to target file ids, write the
+/// `import` edges, and return a per-file map of resolved target ids that
+/// the symbol-reference resolver consumes.
+fn resolve_and_write_import_edges(
+    tx: &Connection,
+    root: &Path,
+    indexed: &[IndexedFile],
+    known_paths: &HashSet<String>,
+    path_to_id: &HashMap<String, i64>,
+    go_module: Option<&str>,
+    dart_packages: &HashMap<String, String>,
+) -> Result<HashMap<i64, HashSet<i64>>> {
+    let mut imports_by_file: HashMap<i64, HashSet<i64>> = HashMap::new();
+    for entry in indexed {
+        let targets_for_entry = imports_by_file.entry(entry.file_id).or_default();
+        for import in &entry.imports {
+            let targets = resolve_targets(
+                &entry.language,
+                &entry.raw_rel,
+                &import.source,
+                root,
+                known_paths,
+                go_module,
+                Some(dart_packages),
+            );
+            for target_rel in &targets {
+                if let Some(&target_id) = path_to_id.get(target_rel.as_str()) {
+                    write::insert_edge(
+                        tx,
+                        entry.file_id,
+                        target_id,
+                        "import",
+                        Some(&import.source),
+                    )?;
+                    targets_for_entry.insert(target_id);
+                }
+            }
+        }
+    }
+    Ok(imports_by_file)
+}
+
 /// Index a single project root into the shared database.
 ///
 /// `path_prefix` is prepended to every relative path stored in the DB. For
@@ -116,6 +253,174 @@ fn root_prefix(root: &Path) -> String {
 /// `extra_known` is a pre-populated set of paths from other roots. It is
 /// merged into the local `known_paths` before import resolution so that
 /// cross-root imports can find their targets.
+/// Outcome of processing a single source file during full-index ingestion.
+enum FileIngestOutcome {
+    /// File was parsed and its symbols were appended to `indexed`.
+    Ingested,
+    /// File exists on disk and in the DB with a matching mtime. Its paths
+    /// were recorded in `known_paths` so stale-file cleanup won't touch it.
+    Unchanged,
+    /// Stat, read, parse failure, or oversized. The caller logged the cause.
+    Skipped,
+}
+
+/// Process one source file for full indexing: stat, skip-if-unchanged, parse,
+/// and ingest. Each fallible step either returns early with an outcome or
+/// continues. Extracted from `full_index_root` so the per-file decisions stay
+/// isolated from the surrounding pipeline.
+#[allow(clippy::too_many_arguments)]
+fn try_ingest_file(
+    tx: &Connection,
+    file_path: &Path,
+    root: &Path,
+    path_prefix: &str,
+    force: bool,
+    max_bytes: u64,
+    pool: &ParserPool,
+    indexed: &mut Vec<IndexedFile>,
+    known_paths: &mut HashSet<String>,
+) -> Result<FileIngestOutcome> {
+    let raw_rel = match file_path.strip_prefix(root) {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => file_path.to_string_lossy().to_string(),
+    };
+    let rel_path = if path_prefix.is_empty() {
+        raw_rel.clone()
+    } else {
+        format!("{path_prefix}/{raw_rel}")
+    };
+
+    let metadata = match std::fs::metadata(file_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("cannot stat {}: {e}", file_path.display());
+            return Ok(FileIngestOutcome::Skipped);
+        }
+    };
+    let mtime_ns = file_mtime_ns(&metadata);
+    let size_bytes = metadata.len() as i64;
+
+    if metadata.len() > max_bytes {
+        tracing::debug!(
+            "skipping oversized file {} ({} bytes)",
+            file_path.display(),
+            metadata.len()
+        );
+        return Ok(FileIngestOutcome::Skipped);
+    }
+
+    if !force
+        && let Some(existing) = read::get_file_by_path(tx, &rel_path)?
+        && existing.mtime_ns == mtime_ns
+    {
+        known_paths.insert(rel_path.clone());
+        if !path_prefix.is_empty() {
+            known_paths.insert(raw_rel);
+        }
+        return Ok(FileIngestOutcome::Unchanged);
+    }
+
+    let source = match std::fs::read(file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("cannot read {}: {e}", file_path.display());
+            return Ok(FileIngestOutcome::Skipped);
+        }
+    };
+
+    let (parse_result, language) = match pool.parse_file(file_path, &source) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("parse failed for {}: {e}", file_path.display());
+            return Ok(FileIngestOutcome::Skipped);
+        }
+    };
+
+    known_paths.insert(rel_path.clone());
+    if !path_prefix.is_empty() {
+        known_paths.insert(raw_rel.clone());
+    }
+
+    let symbols_inserted = ingest_parsed_file(
+        tx,
+        rel_path,
+        raw_rel,
+        mtime_ns,
+        size_bytes,
+        &source,
+        parse_result,
+        language,
+        ExistingFileStrategy::DeleteAll,
+        indexed,
+    )?;
+
+    tracing::debug!(
+        "indexed {} ({} symbols)",
+        file_path.display(),
+        symbols_inserted
+    );
+
+    Ok(FileIngestOutcome::Ingested)
+}
+
+/// Delete DB rows for files that exist in the index but are no longer on disk
+/// under `root`. Files outside this root's `path_prefix` are left alone so
+/// other roots in multi-root mode aren't affected. Returns the delete count.
+fn remove_stale_files(
+    tx: &Connection,
+    root: &Path,
+    path_prefix: &str,
+    known_paths: &HashSet<String>,
+) -> Result<usize> {
+    let db_files = read::get_all_files(tx)?;
+    let mut deleted: usize = 0;
+    for db_file in &db_files {
+        if !path_prefix.is_empty() && !db_file.path.starts_with(&format!("{path_prefix}/")) {
+            continue;
+        }
+        if !known_paths.contains(&db_file.path) {
+            let disk_rel = if path_prefix.is_empty() {
+                db_file.path.clone()
+            } else {
+                db_file.path[path_prefix.len() + 1..].to_string()
+            };
+            let full_path = root.join(&disk_rel);
+            if !full_path.exists() {
+                write::delete_file_data(tx, db_file.id)?;
+                deleted += 1;
+                tracing::debug!("removed stale file from index: {}", db_file.path);
+            }
+        }
+    }
+    Ok(deleted)
+}
+
+/// Rebuild semantic embeddings when the model is available on disk.
+/// Best-effort: if the model hasn't been downloaded yet, indexing succeeds
+/// without embeddings and semantic search returns empty results.
+#[cfg(feature = "semantic")]
+fn rebuild_semantic_embeddings_if_available(tx: &Connection, root: &Path) {
+    let Some(model_dir) = crate::embeddings::default_model_dir() else {
+        return;
+    };
+    if !model_dir.join(crate::embeddings::MODEL_FILENAME).exists() {
+        return;
+    }
+    match crate::embeddings::EmbeddingModel::load(&model_dir) {
+        Ok(model) => {
+            let roots = vec![root.to_path_buf()];
+            if let Err(e) = write::rebuild_embeddings(tx, &model, &roots) {
+                tracing::warn!("failed to rebuild embeddings: {e}");
+            } else {
+                tracing::info!("semantic embeddings rebuilt");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("failed to load embedding model: {e}");
+        }
+    }
+}
+
 pub fn full_index_root(
     conn: &Connection,
     root: &Path,
@@ -139,157 +444,24 @@ pub fn full_index_root(
     let mut updated: usize = 0;
 
     for file_path in &files {
-        let raw_rel = match file_path.strip_prefix(root) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => file_path.to_string_lossy().to_string(),
-        };
-        let rel_path = if path_prefix.is_empty() {
-            raw_rel.clone()
-        } else {
-            format!("{path_prefix}/{raw_rel}")
-        };
-
-        let metadata = match std::fs::metadata(file_path) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("cannot stat {}: {e}", file_path.display());
-                continue;
-            }
-        };
-        let mtime_ns = file_mtime_ns(&metadata);
-        let size_bytes = metadata.len() as i64;
-
-        if metadata.len() > max_bytes {
-            tracing::debug!(
-                "skipping oversized file {} ({} bytes)",
-                file_path.display(),
-                metadata.len()
-            );
-            continue;
-        }
-
-        if !force
-            && let Some(existing) = read::get_file_by_path(&tx, &rel_path)?
-            && existing.mtime_ns == mtime_ns
-        {
-            known_paths.insert(rel_path.clone());
-            if !path_prefix.is_empty() {
-                known_paths.insert(raw_rel);
-            }
-            skipped += 1;
-            continue;
-        }
-
-        let source = match std::fs::read(file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("cannot read {}: {e}", file_path.display());
-                continue;
-            }
-        };
-
-        let (parse_result, language) = match pool.parse_file(file_path, &source) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("parse failed for {}: {e}", file_path.display());
-                continue;
-            }
-        };
-
-        let newline_count = source.iter().filter(|&&b| b == b'\n').count();
-        let line_count = if source.last() == Some(&b'\n') || source.is_empty() {
-            newline_count as i64
-        } else {
-            newline_count as i64 + 1
-        };
-
-        if let Some(existing) = read::get_file_by_path(&tx, &rel_path)? {
-            write::delete_file_data(&tx, existing.id)?;
-        }
-
-        let file_id =
-            write::upsert_file(&tx, &rel_path, mtime_ns, size_bytes, &language, line_count)?;
-
-        let symbol_inserts: Vec<SymbolInsert> = parse_result
-            .symbols
-            .iter()
-            .map(|s| SymbolInsert {
-                name: s.name.clone(),
-                kind: s.kind.as_str().to_string(),
-                line_start: s.line_start,
-                line_end: s.line_end,
-                signature: s.signature.clone(),
-                is_exported: s.is_exported,
-                shape_hash: compute_shape_hash(&source, s.line_start, s.line_end),
-                unused_excluded: s.unused_excluded,
-                parent_idx: s.parent_idx,
-                complexity: s.complexity,
-                owner_type: s.owner_type.clone(),
-            })
-            .collect();
-
-        let symbol_ids = write::insert_symbols(&tx, file_id, &symbol_inserts)?;
-
-        if !parse_result.type_relations.is_empty() {
-            let tuples: Vec<_> = parse_result
-                .type_relations
-                .iter()
-                .map(|r| {
-                    (
-                        r.sub_name.clone(),
-                        r.super_name.clone(),
-                        r.kind.as_str().to_string(),
-                        r.line,
-                    )
-                })
-                .collect();
-            write::insert_type_relations(&tx, file_id, &tuples)?;
-        }
-
-        known_paths.insert(rel_path.clone());
-        if !path_prefix.is_empty() {
-            known_paths.insert(raw_rel.clone());
-        }
-        updated += 1;
-
-        indexed.push(IndexedFile {
-            file_id,
-            rel_path,
-            raw_rel,
-            language,
-            imports: parse_result.imports,
-            symbol_ids,
-            references: parse_result.references,
-        });
-
-        tracing::debug!(
-            "indexed {} ({} symbols)",
-            file_path.display(),
-            symbol_inserts.len()
-        );
-    }
-
-    let db_files = read::get_all_files(&tx)?;
-    let mut deleted: usize = 0;
-    for db_file in &db_files {
-        // Only consider files belonging to this root (matching our prefix).
-        if !path_prefix.is_empty() && !db_file.path.starts_with(&format!("{path_prefix}/")) {
-            continue;
-        }
-        if !known_paths.contains(&db_file.path) {
-            let disk_rel = if path_prefix.is_empty() {
-                db_file.path.clone()
-            } else {
-                db_file.path[path_prefix.len() + 1..].to_string()
-            };
-            let full_path = root.join(&disk_rel);
-            if !full_path.exists() {
-                write::delete_file_data(&tx, db_file.id)?;
-                deleted += 1;
-                tracing::debug!("removed stale file from index: {}", db_file.path);
-            }
+        match try_ingest_file(
+            &tx,
+            file_path,
+            root,
+            path_prefix,
+            force,
+            max_bytes,
+            &pool,
+            &mut indexed,
+            &mut known_paths,
+        )? {
+            FileIngestOutcome::Ingested => updated += 1,
+            FileIngestOutcome::Unchanged => skipped += 1,
+            FileIngestOutcome::Skipped => {}
         }
     }
+
+    let deleted = remove_stale_files(&tx, root, path_prefix, &known_paths)?;
 
     let path_to_id: HashMap<String, i64> = {
         let all_files = read::get_all_files(&tx)?;
@@ -300,33 +472,15 @@ pub fn full_index_root(
     // set of files we actually imported from. The reference resolver below
     // uses that set as the Priority-2 lookup ("target symbol lives in a
     // file we import").
-    let mut imports_by_file: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for entry in &indexed {
-        let targets_for_entry = imports_by_file.entry(entry.file_id).or_default();
-        for import in &entry.imports {
-            let targets = resolve_targets(
-                &entry.language,
-                &entry.raw_rel,
-                &import.source,
-                root,
-                &known_paths,
-                go_module.as_deref(),
-                Some(&dart_packages),
-            );
-            for target_rel in &targets {
-                if let Some(&target_id) = path_to_id.get(target_rel.as_str()) {
-                    write::insert_edge(
-                        &tx,
-                        entry.file_id,
-                        target_id,
-                        "import",
-                        Some(&import.source),
-                    )?;
-                    targets_for_entry.insert(target_id);
-                }
-            }
-        }
-    }
+    let imports_by_file = resolve_and_write_import_edges(
+        &tx,
+        root,
+        &indexed,
+        &known_paths,
+        &path_to_id,
+        go_module.as_deref(),
+        &dart_packages,
+    )?;
 
     resolve_symbol_references(&tx, &indexed, &imports_by_file)?;
 
@@ -334,29 +488,8 @@ pub fn full_index_root(
     write::rebuild_symbol_bodies(&tx, root)?;
     write::populate_unused_exports(&tx)?;
 
-    // Rebuild semantic embeddings when the model is available on disk.
-    // Best-effort: if the model hasn't been downloaded yet, indexing
-    // succeeds without embeddings and semantic search returns empty results.
     #[cfg(feature = "semantic")]
-    {
-        if let Some(model_dir) = crate::embeddings::default_model_dir()
-            && model_dir.join(crate::embeddings::MODEL_FILENAME).exists()
-        {
-            match crate::embeddings::EmbeddingModel::load(&model_dir) {
-                Ok(model) => {
-                    let roots = vec![root.to_path_buf()];
-                    if let Err(e) = write::rebuild_embeddings(&tx, &model, &roots) {
-                        tracing::warn!("failed to rebuild embeddings: {e}");
-                    } else {
-                        tracing::info!("semantic embeddings rebuilt");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("failed to load embedding model: {e}");
-                }
-            }
-        }
-    }
+    rebuild_semantic_embeddings_if_available(&tx, root);
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -779,9 +912,6 @@ fn resolve_rust_import(
     known_files: &HashSet<String>,
 ) -> Option<String> {
     let segments: Vec<&str> = specifier.split("::").collect();
-    if segments.is_empty() {
-        return None;
-    }
 
     let rest = if segments.len() > 1 {
         segments[1..].join("/")
@@ -836,10 +966,18 @@ fn resolve_rust_import(
                 parent.to_string_lossy().to_string()
             } else {
                 let stem = file_path.file_stem()?.to_str()?;
-                format!("{}/{stem}", parent.display())
+                if parent.as_os_str().is_empty() {
+                    stem.to_string()
+                } else {
+                    format!("{}/{stem}", parent.display())
+                }
             };
 
-            let target = format!("{self_dir}/{rest}");
+            let target = if self_dir.is_empty() {
+                rest
+            } else {
+                format!("{self_dir}/{rest}")
+            };
             try_rust_module(&target, known_files, &[""])
         }
         _ => None,
@@ -1123,6 +1261,85 @@ fn file_mtime_ns(metadata: &std::fs::Metadata) -> i64 {
 /// After updating the per-file rows, the function re-resolves import
 /// edges and symbol references for the changed files, then rebuilds the
 /// global FTS and unused-export tables.
+/// Remove a single deleted file's rows from the index, if present.
+fn delete_single_file(tx: &Connection, root: &Path, path: &Path) -> Result<bool> {
+    let rel_path = match path.strip_prefix(root) {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    };
+    if let Some(existing) = read::get_file_by_path(tx, &rel_path)? {
+        write::delete_file_data(tx, existing.id)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Re-index a single file that was reported as changed by the watcher.
+/// Returns `true` if the file was ingested, `false` if it was skipped due to
+/// stat/read/parse failure or oversize. The caller tracks the update count.
+fn try_reingest_changed_file(
+    tx: &Connection,
+    file_path: &Path,
+    root: &Path,
+    max_bytes: u64,
+    pool: &ParserPool,
+    indexed: &mut Vec<IndexedFile>,
+) -> Result<bool> {
+    let rel_path = match file_path.strip_prefix(root) {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => file_path.to_string_lossy().to_string(),
+    };
+
+    let metadata = match std::fs::metadata(file_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("incremental: cannot stat {}: {e}", file_path.display());
+            return Ok(false);
+        }
+    };
+    let mtime_ns = file_mtime_ns(&metadata);
+    let size_bytes = metadata.len() as i64;
+
+    if metadata.len() > max_bytes {
+        tracing::debug!(
+            "incremental: skipping oversized file {} ({} bytes)",
+            file_path.display(),
+            metadata.len()
+        );
+        return Ok(false);
+    }
+
+    let source = match std::fs::read(file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("incremental: cannot read {}: {e}", file_path.display());
+            return Ok(false);
+        }
+    };
+
+    let (parse_result, language) = match pool.parse_file(file_path, &source) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("incremental: parse failed for {}: {e}", file_path.display());
+            return Ok(false);
+        }
+    };
+
+    ingest_parsed_file(
+        tx,
+        rel_path.clone(),
+        rel_path,
+        mtime_ns,
+        size_bytes,
+        &source,
+        parse_result,
+        language,
+        ExistingFileStrategy::ClearContentOnly,
+        indexed,
+    )?;
+    Ok(true)
+}
+
 pub fn incremental_index(
     conn: &Connection,
     root: &Path,
@@ -1143,12 +1360,7 @@ pub fn incremental_index(
     // --- Phase 1: remove deleted files ---
     let mut removed = 0usize;
     for path in deleted {
-        let rel_path = match path.strip_prefix(root) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => path.to_string_lossy().to_string(),
-        };
-        if let Some(existing) = read::get_file_by_path(&tx, &rel_path)? {
-            write::delete_file_data(&tx, existing.id)?;
+        if delete_single_file(&tx, root, path)? {
             removed += 1;
         }
     }
@@ -1158,109 +1370,9 @@ pub fn incremental_index(
     let mut updated = 0usize;
 
     for file_path in changed {
-        let rel_path = match file_path.strip_prefix(root) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => file_path.to_string_lossy().to_string(),
-        };
-
-        let metadata = match std::fs::metadata(file_path) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("incremental: cannot stat {}: {e}", file_path.display());
-                continue;
-            }
-        };
-        let mtime_ns = file_mtime_ns(&metadata);
-        let size_bytes = metadata.len() as i64;
-
-        if metadata.len() > max_bytes {
-            tracing::debug!(
-                "incremental: skipping oversized file {} ({} bytes)",
-                file_path.display(),
-                metadata.len()
-            );
-            continue;
+        if try_reingest_changed_file(&tx, file_path, root, max_bytes, &pool, &mut indexed)? {
+            updated += 1;
         }
-
-        let source = match std::fs::read(file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("incremental: cannot read {}: {e}", file_path.display());
-                continue;
-            }
-        };
-
-        let (parse_result, language) = match pool.parse_file(file_path, &source) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("incremental: parse failed for {}: {e}", file_path.display());
-                continue;
-            }
-        };
-
-        let newline_count = source.iter().filter(|&&b| b == b'\n').count();
-        let line_count = if source.last() == Some(&b'\n') || source.is_empty() {
-            newline_count as i64
-        } else {
-            newline_count as i64 + 1
-        };
-
-        // If the file already exists, clear its derived content (symbols,
-        // outgoing edges) while preserving the file_id and incoming edges.
-        if let Some(existing) = read::get_file_by_path(&tx, &rel_path)? {
-            write::clear_file_content(&tx, existing.id)?;
-        }
-
-        let file_id =
-            write::upsert_file(&tx, &rel_path, mtime_ns, size_bytes, &language, line_count)?;
-
-        let symbol_inserts: Vec<SymbolInsert> = parse_result
-            .symbols
-            .iter()
-            .map(|s| SymbolInsert {
-                name: s.name.clone(),
-                kind: s.kind.as_str().to_string(),
-                line_start: s.line_start,
-                line_end: s.line_end,
-                signature: s.signature.clone(),
-                is_exported: s.is_exported,
-                shape_hash: compute_shape_hash(&source, s.line_start, s.line_end),
-                unused_excluded: s.unused_excluded,
-                parent_idx: s.parent_idx,
-                complexity: s.complexity,
-                owner_type: s.owner_type.clone(),
-            })
-            .collect();
-
-        let symbol_ids = write::insert_symbols(&tx, file_id, &symbol_inserts)?;
-
-        if !parse_result.type_relations.is_empty() {
-            let tuples: Vec<_> = parse_result
-                .type_relations
-                .iter()
-                .map(|r| {
-                    (
-                        r.sub_name.clone(),
-                        r.super_name.clone(),
-                        r.kind.as_str().to_string(),
-                        r.line,
-                    )
-                })
-                .collect();
-            write::insert_type_relations(&tx, file_id, &tuples)?;
-        }
-
-        updated += 1;
-
-        indexed.push(IndexedFile {
-            file_id,
-            rel_path: rel_path.clone(),
-            raw_rel: rel_path,
-            language,
-            imports: parse_result.imports,
-            symbol_ids,
-            references: parse_result.references,
-        });
     }
 
     // --- Phase 3: resolve edges & references for changed files ---
@@ -1271,33 +1383,15 @@ pub fn incremental_index(
     };
     let known_paths: HashSet<String> = path_to_id.keys().cloned().collect();
 
-    let mut imports_by_file: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for entry in &indexed {
-        let targets_for_entry = imports_by_file.entry(entry.file_id).or_default();
-        for import in &entry.imports {
-            let targets = resolve_targets(
-                &entry.language,
-                &entry.raw_rel,
-                &import.source,
-                root,
-                &known_paths,
-                go_module.as_deref(),
-                Some(&dart_packages),
-            );
-            for target_rel in &targets {
-                if let Some(&target_id) = path_to_id.get(target_rel.as_str()) {
-                    write::insert_edge(
-                        &tx,
-                        entry.file_id,
-                        target_id,
-                        "import",
-                        Some(&import.source),
-                    )?;
-                    targets_for_entry.insert(target_id);
-                }
-            }
-        }
-    }
+    let imports_by_file = resolve_and_write_import_edges(
+        &tx,
+        root,
+        &indexed,
+        &known_paths,
+        &path_to_id,
+        go_module.as_deref(),
+        &dart_packages,
+    )?;
 
     resolve_symbol_references(&tx, &indexed, &imports_by_file)?;
 
@@ -1499,10 +1593,91 @@ mod tests {
     }
 
     #[test]
+    fn test_rust_self_from_root_lib_rs_resolves_sibling() {
+        let mut known = HashSet::new();
+        known.insert("lib.rs".to_string());
+        known.insert("bar.rs".to_string());
+
+        let result = resolve_rust_import("lib.rs", "self::bar", &known);
+        assert_eq!(result, Some("bar.rs".to_string()));
+    }
+
+    #[test]
+    fn test_rust_self_from_root_lib_rs_resolves_nested() {
+        let mut known = HashSet::new();
+        known.insert("lib.rs".to_string());
+        known.insert("sub/thing.rs".to_string());
+
+        let result = resolve_rust_import("lib.rs", "self::sub::thing", &known);
+        assert_eq!(result, Some("sub/thing.rs".to_string()));
+    }
+
+    #[test]
     fn test_rust_external_crate_ignored() {
         let known = HashSet::new();
         let result = resolve_rust_import("src/main.rs", "serde::Serialize", &known);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rust_empty_specifier_returns_none() {
+        let mut known = HashSet::new();
+        known.insert("lib.rs".to_string());
+        let result = resolve_rust_import("lib.rs", "", &known);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rust_unrecognized_root_returns_none() {
+        let mut known = HashSet::new();
+        known.insert("lib.rs".to_string());
+        let result = resolve_rust_import("lib.rs", "external::mod", &known);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rust_self_from_src_lib_rs_resolves_sibling() {
+        let mut known = HashSet::new();
+        known.insert("src/lib.rs".to_string());
+        known.insert("src/bar.rs".to_string());
+        let result = resolve_rust_import("src/lib.rs", "self::bar", &known);
+        assert_eq!(result, Some("src/bar.rs".to_string()));
+    }
+
+    #[test]
+    fn test_rust_self_from_src_module_rs_resolves_nested() {
+        let mut known = HashSet::new();
+        known.insert("src/foo.rs".to_string());
+        known.insert("src/foo/bar.rs".to_string());
+        let result = resolve_rust_import("src/foo.rs", "self::bar", &known);
+        assert_eq!(result, Some("src/foo/bar.rs".to_string()));
+    }
+
+    #[test]
+    fn test_rust_super_from_src_module_rs() {
+        let mut known = HashSet::new();
+        known.insert("src/foo.rs".to_string());
+        known.insert("src/bar.rs".to_string());
+        let result = resolve_rust_import("src/foo.rs", "super::bar", &known);
+        assert_eq!(result, Some("src/bar.rs".to_string()));
+    }
+
+    #[test]
+    fn test_rust_super_from_root_lib_rs() {
+        let mut known = HashSet::new();
+        known.insert("lib.rs".to_string());
+        known.insert("bar.rs".to_string());
+        let result = resolve_rust_import("lib.rs", "super::bar", &known);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rust_crate_from_any_file_resolves_root() {
+        let mut known = HashSet::new();
+        known.insert("src/lib.rs".to_string());
+        known.insert("src/bar.rs".to_string());
+        let result = resolve_rust_import("src/some/deep/file.rs", "crate::bar", &known);
+        assert_eq!(result, Some("src/bar.rs".to_string()));
     }
 
     // --- Python resolver ---
@@ -2075,8 +2250,7 @@ mod tests {
         let refs = symbol_ref_names(&conn);
         assert!(
             refs.iter().any(|(f, t)| f == "caller" && t == "helper"),
-            "expected (caller -> helper) edge, got {:?}",
-            refs
+            "expected (caller -> helper) edge, got {refs:?}"
         );
     }
 
@@ -2103,8 +2277,7 @@ mod tests {
         let refs = symbol_ref_names(&conn);
         assert!(
             refs.iter().any(|(f, t)| f == "run" && t == "do_work"),
-            "expected (run -> do_work) edge across files, got {:?}",
-            refs
+            "expected (run -> do_work) edge across files, got {refs:?}"
         );
     }
 
@@ -2150,8 +2323,7 @@ mod tests {
         let refs = symbol_ref_names(&conn);
         assert!(
             refs.iter().any(|(f, t)| f == "caller" && t == "helper"),
-            "expected (caller -> helper) edge for Python, got {:?}",
-            refs
+            "expected (caller -> helper) edge for Python, got {refs:?}"
         );
     }
 
@@ -2184,8 +2356,7 @@ mod tests {
             .collect();
         assert!(
             caller_to_common.is_empty(),
-            "ambiguous global `common` should not resolve, got {:?}",
-            caller_to_common
+            "ambiguous global `common` should not resolve, got {caller_to_common:?}"
         );
     }
 
@@ -2373,8 +2544,7 @@ mod tests {
         assert_eq!(
             caller_new.len(),
             1,
-            "Foo::new() should resolve to exactly one target, got {:?}",
-            caller_new
+            "Foo::new() should resolve to exactly one target, got {caller_new:?}"
         );
     }
 
@@ -2402,8 +2572,7 @@ mod tests {
         let refs = symbol_ref_names(&conn);
         assert!(
             refs.iter().any(|(f, t)| f == "run" && t == "helper"),
-            "self.helper() inside impl Foo should resolve run -> helper, got {:?}",
-            refs
+            "self.helper() inside impl Foo should resolve run -> helper, got {refs:?}"
         );
     }
 
@@ -2433,5 +2602,376 @@ mod tests {
             Some("Widget"),
             "owner_type should be persisted to DB"
         );
+    }
+
+    // --- Helper-level tests for the refactor ---
+    //
+    // The end-to-end tests above transitively exercise try_ingest_file,
+    // remove_stale_files, try_reingest_changed_file, and delete_single_file.
+    // These tests pin down their direct contracts so accidental changes to
+    // outcome semantics get caught at the unit level.
+
+    fn open_test_conn() -> rusqlite::Connection {
+        storage::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn try_ingest_file_returns_ingested_for_new_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("a.ts");
+        fs::write(&file_path, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+        let mut known: HashSet<String> = HashSet::new();
+
+        let outcome = try_ingest_file(
+            &tx,
+            &file_path,
+            root,
+            "",
+            false,
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+            &mut known,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert!(matches!(outcome, FileIngestOutcome::Ingested));
+        assert_eq!(indexed.len(), 1);
+        assert!(known.contains("a.ts"));
+    }
+
+    #[test]
+    fn try_ingest_file_returns_unchanged_when_mtime_matches() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("a.ts");
+        fs::write(&file_path, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        // First ingestion populates the file row in the DB.
+        full_index(&conn, root, true).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+        let mut known: HashSet<String> = HashSet::new();
+
+        let outcome = try_ingest_file(
+            &tx,
+            &file_path,
+            root,
+            "",
+            false,
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+            &mut known,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert!(matches!(outcome, FileIngestOutcome::Unchanged));
+        assert!(indexed.is_empty(), "Unchanged must not append to indexed");
+        assert!(
+            known.contains("a.ts"),
+            "Unchanged path must still be recorded so stale-cleanup leaves it alone"
+        );
+    }
+
+    #[test]
+    fn try_ingest_file_force_reingests_unchanged_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("a.ts");
+        fs::write(&file_path, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        full_index(&conn, root, true).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+        let mut known: HashSet<String> = HashSet::new();
+
+        let outcome = try_ingest_file(
+            &tx,
+            &file_path,
+            root,
+            "",
+            true, // force
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+            &mut known,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert!(matches!(outcome, FileIngestOutcome::Ingested));
+    }
+
+    #[test]
+    fn try_ingest_file_skips_stat_failure() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let missing = root.join("does_not_exist.ts");
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+        let mut known: HashSet<String> = HashSet::new();
+
+        let outcome = try_ingest_file(
+            &tx,
+            &missing,
+            root,
+            "",
+            false,
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+            &mut known,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, FileIngestOutcome::Skipped));
+        assert!(indexed.is_empty());
+        assert!(known.is_empty());
+    }
+
+    #[test]
+    fn try_ingest_file_skips_oversize() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("big.ts");
+        fs::write(&file_path, b"export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+        let mut known: HashSet<String> = HashSet::new();
+
+        // max_bytes = 5 forces the 20-byte file to be skipped.
+        let outcome = try_ingest_file(
+            &tx,
+            &file_path,
+            root,
+            "",
+            false,
+            5,
+            &pool,
+            &mut indexed,
+            &mut known,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, FileIngestOutcome::Skipped));
+        assert!(indexed.is_empty());
+    }
+
+    #[test]
+    fn try_ingest_file_records_both_paths_in_multi_root_mode() {
+        // In multi-root mode, path_prefix is non-empty. The Unchanged branch
+        // moves `raw_rel` into known_paths after inserting `rel_path`, so both
+        // the prefixed and unprefixed paths must be present.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("a.ts");
+        fs::write(&file_path, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        // Seed the DB with a prefixed path so the Unchanged branch fires.
+        full_index_root(&conn, root, true, "alpha", &HashSet::new()).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+        let mut known: HashSet<String> = HashSet::new();
+
+        let outcome = try_ingest_file(
+            &tx,
+            &file_path,
+            root,
+            "alpha",
+            false,
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+            &mut known,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert!(matches!(outcome, FileIngestOutcome::Unchanged));
+        assert!(
+            known.contains("alpha/a.ts"),
+            "prefixed path must be recorded"
+        );
+        assert!(
+            known.contains("a.ts"),
+            "unprefixed raw_rel must also be recorded"
+        );
+    }
+
+    #[test]
+    fn remove_stale_files_deletes_missing_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("keep.ts"), "export const k = 1;\n").unwrap();
+        fs::write(root.join("drop.ts"), "export const d = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        full_index(&conn, root, true).unwrap();
+        assert_eq!(read::get_file_count(&conn).unwrap(), 2);
+
+        // Delete one file from disk so it becomes stale relative to the index.
+        fs::remove_file(root.join("drop.ts")).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut known = HashSet::new();
+        known.insert("keep.ts".to_string());
+        let removed = remove_stale_files(&tx, root, "", &known).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(read::get_file_by_path(&conn, "drop.ts").unwrap().is_none());
+        assert!(read::get_file_by_path(&conn, "keep.ts").unwrap().is_some());
+    }
+
+    #[test]
+    fn remove_stale_files_skips_files_outside_path_prefix() {
+        // Multi-root invariant: removal must only touch files belonging to
+        // the current root (matching its prefix), so other roots' files
+        // aren't deleted by this root's cleanup pass.
+        let tmp = TempDir::new().unwrap();
+        let root_a = tmp.path().join("a");
+        let root_b = tmp.path().join("b");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        fs::write(root_a.join("a.ts"), "export const a = 1;\n").unwrap();
+        fs::write(root_b.join("b.ts"), "export const b = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        full_index_root(&conn, &root_a, true, "a", &HashSet::new()).unwrap();
+        full_index_root(&conn, &root_b, true, "b", &HashSet::new()).unwrap();
+        assert_eq!(read::get_file_count(&conn).unwrap(), 2);
+
+        // Delete b.ts from disk. Cleanup with prefix "a" must NOT remove it.
+        fs::remove_file(root_b.join("b.ts")).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut known_a = HashSet::new();
+        known_a.insert("a/a.ts".to_string());
+        let removed = remove_stale_files(&tx, &root_a, "a", &known_a).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(
+            removed, 0,
+            "remove_stale_files must not touch files outside its prefix"
+        );
+        assert!(
+            read::get_file_by_path(&conn, "b/b.ts").unwrap().is_some(),
+            "b/b.ts must survive cleanup of root a"
+        );
+    }
+
+    #[test]
+    fn delete_single_file_returns_false_for_unknown_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let result = delete_single_file(&tx, root, &root.join("never_indexed.ts")).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn delete_single_file_removes_indexed_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("a.ts"), "export const a = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        full_index(&conn, root, true).unwrap();
+        assert!(read::get_file_by_path(&conn, "a.ts").unwrap().is_some());
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let removed = delete_single_file(&tx, root, &root.join("a.ts")).unwrap();
+        tx.commit().unwrap();
+
+        assert!(removed);
+        assert!(read::get_file_by_path(&conn, "a.ts").unwrap().is_none());
+    }
+
+    #[test]
+    fn try_reingest_changed_file_reports_skip_for_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+
+        let result = try_reingest_changed_file(
+            &tx,
+            &root.join("missing.ts"),
+            root,
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+        )
+        .unwrap();
+
+        assert!(!result, "missing file must report skip");
+        assert!(indexed.is_empty());
+    }
+
+    #[test]
+    fn try_reingest_changed_file_ingests_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("a.ts");
+        fs::write(&file_path, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+
+        let result =
+            try_reingest_changed_file(&tx, &file_path, root, max_file_bytes(), &pool, &mut indexed)
+                .unwrap();
+        tx.commit().unwrap();
+
+        assert!(result);
+        assert_eq!(indexed.len(), 1);
+    }
+
+    #[test]
+    fn try_reingest_changed_file_skips_oversize() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("big.ts");
+        fs::write(&file_path, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+
+        let result =
+            try_reingest_changed_file(&tx, &file_path, root, 5, &pool, &mut indexed).unwrap();
+
+        assert!(!result);
+        assert!(indexed.is_empty());
     }
 }

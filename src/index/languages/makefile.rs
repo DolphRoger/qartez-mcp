@@ -1,6 +1,7 @@
 use tree_sitter::{Language, Node};
 
 use super::LanguageSupport;
+use super::common::{self, children, node_text};
 use crate::index::symbols::{ExtractedImport, ExtractedSymbol, ParseResult, SymbolKind};
 
 pub struct MakefileSupport;
@@ -58,10 +59,6 @@ impl LanguageSupport for MakefileSupport {
             ..Default::default()
         }
     }
-}
-
-fn children(node: Node) -> impl Iterator<Item = Node> {
-    (0..node.child_count() as u32).filter_map(move |i| node.child(i))
 }
 
 fn collect_phony(node: Node, source: &[u8], phony_targets: &mut Vec<String>) {
@@ -158,27 +155,7 @@ fn extract_include(node: Node, source: &[u8], imports: &mut Vec<ExtractedImport>
 }
 
 fn extract_signature(node: Node, source: &[u8]) -> Option<String> {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    let text = std::str::from_utf8(&source[start..end]).ok()?;
-    let first_line = text.lines().next().unwrap_or(text).trim();
-    if first_line.is_empty() {
-        return None;
-    }
-    let truncated = if first_line.len() > 200 {
-        &first_line[..200]
-    } else {
-        first_line
-    };
-    Some(truncated.to_string())
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte().min(source.len());
-    std::str::from_utf8(&source[start..end])
-        .unwrap_or("")
-        .to_string()
+    common::first_line_signature(node, source)
 }
 
 #[cfg(test)]

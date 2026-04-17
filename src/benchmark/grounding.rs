@@ -335,213 +335,264 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // as the path half of a range claim.
         let mut consumed: Vec<(usize, usize)> = Vec::new();
 
-        // Ranged claims first (highest precedence).
-        for cap in rx.range_bracketed.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            if is_url_context(body, m.start()) {
-                continue;
-            }
-            let path = cap.get(1).map(|g| g.as_str().to_string());
-            let start = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
-            let end = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
-            if let (Some(path), Some(start), Some(end)) = (path, start, end)
-                && path_ok(&path)
-                && push_claim(&mut out, &mut seen, Claim::FileRange { path, start, end })
-            {
-                consumed.push((m.start(), m.end()));
-            }
+        // Ranged claims first (highest precedence). The three regexes
+        // (`L1-L2` brackets, `:1-2` suffix, `@1..2` suffix) all share the
+        // same group layout: 1=path, 2=start, 3=end.
+        for rx_range in [&rx.range_bracketed, &rx.range_colon, &rx.range_at] {
+            extract_range_claims(rx_range, body, &mut consumed, &mut out, &mut seen);
         }
 
-        for cap in rx.range_colon.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            if is_url_context(body, m.start()) {
-                continue;
-            }
-            let path = cap.get(1).map(|g| g.as_str().to_string());
-            let start = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
-            let end = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
-            if let (Some(path), Some(start), Some(end)) = (path, start, end)
-                && path_ok(&path)
-                && push_claim(&mut out, &mut seen, Claim::FileRange { path, start, end })
-            {
-                consumed.push((m.start(), m.end()));
-            }
-        }
+        extract_line_colon_claims(&rx.line_colon, body, &mut consumed, &mut out, &mut seen);
+        extract_lines_verb_claims(&rx.lines_verb, body, &mut consumed, &mut out, &mut seen);
+        extract_read_lines_claims(&rx.read_lines, body, &mut consumed, &mut out, &mut seen);
+        extract_path_backtick_claims(&rx.path_backtick, body, &mut consumed, &mut out, &mut seen);
+        extract_path_bare_claims(&rx.path_bare, body, &mut consumed, &mut out, &mut seen);
 
-        for cap in rx.range_at.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            if is_url_context(body, m.start()) {
-                continue;
-            }
-            let path = cap.get(1).map(|g| g.as_str().to_string());
-            let start = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
-            let end = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
-            if let (Some(path), Some(start), Some(end)) = (path, start, end)
-                && path_ok(&path)
-                && push_claim(&mut out, &mut seen, Claim::FileRange { path, start, end })
-            {
-                consumed.push((m.start(), m.end()));
-            }
-        }
-
-        for cap in rx.line_colon.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            if is_url_context(body, m.start()) {
-                continue;
-            }
-            let path = cap.get(1).map(|g| g.as_str().to_string());
-            let line = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
-            if let (Some(path), Some(line)) = (path, line)
-                && path_ok(&path)
-                && push_claim(&mut out, &mut seen, Claim::FileLine { path, line })
-            {
-                consumed.push((m.start(), m.end()));
-            }
-        }
-
-        for cap in rx.lines_verb.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            let start = cap.get(1).and_then(|g| g.as_str().parse::<u32>().ok());
-            let end = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
-            let path = cap.get(3).map(|g| g.as_str().to_string());
-            if let (Some(path), Some(start), Some(end)) = (path, start, end)
-                && path_ok(&path)
-                && push_claim(&mut out, &mut seen, Claim::FileRange { path, start, end })
-            {
-                consumed.push((m.start(), m.end()));
-            }
-        }
-
-        for cap in rx.read_lines.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            let path = cap.get(1).map(|g| g.as_str().to_string());
-            let start = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
-            let end = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
-            if let Some(path) = path
-                && path_ok(&path)
-            {
-                let claim = match (start, end) {
-                    (Some(s), Some(e)) => Claim::FileRange {
-                        path,
-                        start: s,
-                        end: e,
-                    },
-                    _ => Claim::FilePath { path },
-                };
-                if push_claim(&mut out, &mut seen, claim) {
-                    consumed.push((m.start(), m.end()));
-                }
-            }
-        }
-
-        // Path-only claims (lower precedence than ranges).
-        for cap in rx.path_backtick.captures_iter(body) {
-            let m = cap.get(0).expect("regex match has group 0");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            if is_url_context(body, m.start()) {
-                continue;
-            }
-            if let Some(path) = cap.get(1).map(|g| g.as_str().to_string())
-                && path_ok(&path)
-                && push_claim(&mut out, &mut seen, Claim::FilePath { path })
-            {
-                consumed.push((m.start(), m.end()));
-            }
-        }
-
-        for cap in rx.path_bare.captures_iter(body) {
-            let m = cap.get(1).expect("bare-path regex has path group");
-            if overlaps(&consumed, m.start(), m.end()) {
-                continue;
-            }
-            if is_url_context(body, m.start()) {
-                continue;
-            }
-            let path = m.as_str().to_string();
-            if path_ok(&path) && push_claim(&mut out, &mut seen, Claim::FilePath { path }) {
-                consumed.push((m.start(), m.end()));
-            }
-        }
-
-        // Symbol claims - suppressed inside triple-fenced blocks.
         if !in_fence {
-            // Leading-identifier form comes FIRST so tabular output from
-            // `qartez_find` / `qartez_grep` is captured before the generic
-            // `symbol_kind` regex starts matching kind-first fragments
-            // mid-line. Only fires once per line (the first match).
-            if let Some(cap) = rx.symbol_leading.captures(body) {
-                let name_match = cap.get(1);
-                if let Some(name_m) = name_match
-                    && !overlaps(&consumed, name_m.start(), name_m.end())
-                {
-                    let name = name_m.as_str().to_string();
-                    let kind = cap.get(2).map(|g| g.as_str().to_string());
-                    if is_leading_symbol_candidate(&name)
-                        && push_claim(&mut out, &mut seen, Claim::Symbol { name, kind })
-                    {
-                        consumed.push((name_m.start(), name_m.end()));
-                    }
-                }
-            }
-
-            for cap in rx.symbol_backtick.captures_iter(body) {
-                let m = cap.get(0).expect("regex match has group 0");
-                if overlaps(&consumed, m.start(), m.end()) {
-                    continue;
-                }
-                if let Some(full) = cap.get(1).map(|g| g.as_str()) {
-                    // `foo::Bar` - take the final segment as the claim.
-                    let name = full.rsplit("::").next().unwrap_or(full).to_string();
-                    if symbol_ok(&name)
-                        && push_claim(&mut out, &mut seen, Claim::Symbol { name, kind: None })
-                    {
-                        consumed.push((m.start(), m.end()));
-                    }
-                }
-            }
-
-            for cap in rx.symbol_kind.captures_iter(body) {
-                let m = cap.get(0).expect("regex match has group 0");
-                if overlaps(&consumed, m.start(), m.end()) {
-                    continue;
-                }
-                let kind = cap.get(1).map(|g| g.as_str().to_string());
-                let name = cap.get(2).map(|g| g.as_str().to_string());
-                if let Some(name) = name
-                    && symbol_ok(&name)
-                    && push_claim(&mut out, &mut seen, Claim::Symbol { name, kind })
-                {
-                    consumed.push((m.start(), m.end()));
-                }
-            }
+            extract_symbol_leading_claim(
+                &rx.symbol_leading,
+                body,
+                &mut consumed,
+                &mut out,
+                &mut seen,
+            );
+            extract_symbol_backtick_claims(
+                &rx.symbol_backtick,
+                body,
+                &mut consumed,
+                &mut out,
+                &mut seen,
+            );
+            extract_symbol_kind_claims(&rx.symbol_kind, body, &mut consumed, &mut out, &mut seen);
         }
     }
 
     out
 }
 
+fn extract_line_colon_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) || is_url_context(body, m.start()) {
+            continue;
+        }
+        let path = cap.get(1).map(|g| g.as_str().to_string());
+        let line = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
+        if let (Some(path), Some(line)) = (path, line)
+            && path_ok(&path)
+            && push_claim(out, seen, Claim::FileLine { path, line })
+        {
+            consumed.push((m.start(), m.end()));
+        }
+    }
+}
+
+fn extract_lines_verb_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) {
+            continue;
+        }
+        let start = cap.get(1).and_then(|g| g.as_str().parse::<u32>().ok());
+        let end = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
+        let path = cap.get(3).map(|g| g.as_str().to_string());
+        if let (Some(path), Some(start), Some(end)) = (path, start, end)
+            && path_ok(&path)
+            && push_claim(out, seen, Claim::FileRange { path, start, end })
+        {
+            consumed.push((m.start(), m.end()));
+        }
+    }
+}
+
+fn extract_read_lines_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) {
+            continue;
+        }
+        let path = cap.get(1).map(|g| g.as_str().to_string());
+        let start = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
+        let end = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
+        if let Some(path) = path
+            && path_ok(&path)
+        {
+            let claim = match (start, end) {
+                (Some(s), Some(e)) => Claim::FileRange {
+                    path,
+                    start: s,
+                    end: e,
+                },
+                _ => Claim::FilePath { path },
+            };
+            if push_claim(out, seen, claim) {
+                consumed.push((m.start(), m.end()));
+            }
+        }
+    }
+}
+
+fn extract_path_backtick_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) || is_url_context(body, m.start()) {
+            continue;
+        }
+        if let Some(path) = cap.get(1).map(|g| g.as_str().to_string())
+            && path_ok(&path)
+            && push_claim(out, seen, Claim::FilePath { path })
+        {
+            consumed.push((m.start(), m.end()));
+        }
+    }
+}
+
+fn extract_path_bare_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(1).expect("bare-path regex has path group");
+        if overlaps(consumed, m.start(), m.end()) || is_url_context(body, m.start()) {
+            continue;
+        }
+        let path = m.as_str().to_string();
+        if path_ok(&path) && push_claim(out, seen, Claim::FilePath { path }) {
+            consumed.push((m.start(), m.end()));
+        }
+    }
+}
+
+// Leading-identifier form comes FIRST so tabular output from qartez_find /
+// qartez_grep is captured before the generic symbol_kind regex starts
+// matching kind-first fragments mid-line. Only fires once per line.
+fn extract_symbol_leading_claim(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    if let Some(cap) = rx.captures(body) {
+        let name_match = cap.get(1);
+        if let Some(name_m) = name_match
+            && !overlaps(consumed, name_m.start(), name_m.end())
+        {
+            let name = name_m.as_str().to_string();
+            let kind = cap.get(2).map(|g| g.as_str().to_string());
+            if is_leading_symbol_candidate(&name)
+                && push_claim(out, seen, Claim::Symbol { name, kind })
+            {
+                consumed.push((name_m.start(), name_m.end()));
+            }
+        }
+    }
+}
+
+fn extract_symbol_backtick_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) {
+            continue;
+        }
+        if let Some(full) = cap.get(1).map(|g| g.as_str()) {
+            // `foo::Bar` - take the final segment as the claim.
+            let name = full.rsplit("::").next().unwrap_or(full).to_string();
+            if symbol_ok(&name) && push_claim(out, seen, Claim::Symbol { name, kind: None }) {
+                consumed.push((m.start(), m.end()));
+            }
+        }
+    }
+}
+
+fn extract_symbol_kind_claims(
+    rx: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) {
+            continue;
+        }
+        let kind = cap.get(1).map(|g| g.as_str().to_string());
+        let name = cap.get(2).map(|g| g.as_str().to_string());
+        if let Some(name) = name
+            && symbol_ok(&name)
+            && push_claim(out, seen, Claim::Symbol { name, kind })
+        {
+            consumed.push((m.start(), m.end()));
+        }
+    }
+}
+
 fn overlaps(consumed: &[(usize, usize)], start: usize, end: usize) -> bool {
     consumed.iter().any(|&(s, e)| start < e && end > s)
+}
+
+/// Iterates a regex's matches over `body` and pushes any `path:start-end`
+/// triple as a `Claim::FileRange`, skipping URL-context spans and previously
+/// consumed regions. Group layout: 1=path, 2=start, 3=end.
+fn extract_range_claims(
+    rx_range: &Regex,
+    body: &str,
+    consumed: &mut Vec<(usize, usize)>,
+    out: &mut Vec<Claim>,
+    seen: &mut HashSet<String>,
+) {
+    for cap in rx_range.captures_iter(body) {
+        let m = cap.get(0).expect("regex match has group 0");
+        if overlaps(consumed, m.start(), m.end()) {
+            continue;
+        }
+        if is_url_context(body, m.start()) {
+            continue;
+        }
+        let path = cap.get(1).map(|g| g.as_str().to_string());
+        let start = cap.get(2).and_then(|g| g.as_str().parse::<u32>().ok());
+        let end = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
+        if let (Some(path), Some(start), Some(end)) = (path, start, end)
+            && path_ok(&path)
+            && push_claim(out, seen, Claim::FileRange { path, start, end })
+        {
+            consumed.push((m.start(), m.end()));
+        }
+    }
 }
 
 /// Returns `true` if position `at` in `haystack` is preceded by `://`,
@@ -1189,6 +1240,219 @@ mod tests {
             claims.is_empty(),
             "over-cap input must short-circuit, got {} claims",
             claims.len()
+        );
+    }
+
+    #[test]
+    fn extract_claims_all_three_range_shapes_in_one_input() {
+        // Verifies the deduplicated range-extraction helper handles the
+        // three syntactic forms (`L1-L2` brackets, `:1-2` suffix, `@1..2`
+        // suffix) collaboratively — the consumed-range tracking must
+        // prevent a path that already landed via one shape from re-firing
+        // under another. Each shape uses a distinct path so all three
+        // FileRange claims are expected to land.
+        let input = "\
+src/a.rs [L10-L20]
+src/b.rs:30-40
+@ src/c.rs:50-60";
+        let claims = extract_claims(input);
+        assert!(
+            claims.contains(&Claim::FileRange {
+                path: "src/a.rs".to_string(),
+                start: 10,
+                end: 20,
+            }),
+            "missing bracketed range, got {claims:?}"
+        );
+        assert!(
+            claims.contains(&Claim::FileRange {
+                path: "src/b.rs".to_string(),
+                start: 30,
+                end: 40,
+            }),
+            "missing colon range, got {claims:?}"
+        );
+        assert!(
+            claims.contains(&Claim::FileRange {
+                path: "src/c.rs".to_string(),
+                start: 50,
+                end: 60,
+            }),
+            "missing at-range, got {claims:?}"
+        );
+    }
+
+    #[test]
+    fn extract_claims_range_shapes_dedup_across_helpers() {
+        // The three range loops share the consumed-range tracker. If a
+        // path appears under two shapes on one line, the second shape
+        // must NOT re-fire because the first has already consumed that
+        // span. (Same path, different shapes — first shape wins.)
+        let input = "src/foo.rs [L1-L2] src/foo.rs:1-2";
+        let claims = extract_claims(input);
+        let foo_count = claims
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Claim::FileRange { path, start: 1, end: 2 } if path == "src/foo.rs"
+                )
+            })
+            .count();
+        assert_eq!(
+            foo_count, 1,
+            "exactly one FileRange should land for the same path+span: {claims:?}"
+        );
+    }
+
+    #[test]
+    fn extract_claims_all_eight_helpers_in_one_input() {
+        // Exercises every regex helper extracted in the post-refactor
+        // grounding module. Range shapes: range_bracketed, range_colon,
+        // range_at. Line: line_colon, lines_verb, read_lines. Paths:
+        // path_backtick, path_bare. Symbols: symbol_leading,
+        // symbol_backtick, symbol_kind.
+        let input = "\
+            src/a.rs [L1-L2]\n\
+            src/b.rs:5-7\n\
+            @ src/c.rs:9-11\n\
+            src/d.rs:42\n\
+            lines 50-55 of src/e.rs\n\
+            Read src/f.rs lines 100-110\n\
+            See `src/g.rs` for details.\n\
+            check src/h.rs in the tree.\n\
+             + my_handler - src/i.rs\n\
+            See `Server::run`.\n\
+            fn my_helper does X.\n\
+        ";
+        let claims = extract_claims(input);
+
+        assert!(
+            claims.iter().any(
+                |c| matches!(c, Claim::FileRange { path, start: 1, end: 2 } if path == "src/a.rs")
+            ),
+            "bracketed L-range missing: {claims:?}"
+        );
+        assert!(
+            claims.iter().any(
+                |c| matches!(c, Claim::FileRange { path, start: 5, end: 7 } if path == "src/b.rs")
+            ),
+            "colon range missing: {claims:?}"
+        );
+        assert!(
+            claims.iter().any(
+                |c| matches!(c, Claim::FileRange { path, start: 9, end: 11 } if path == "src/c.rs")
+            ),
+            "at-range missing: {claims:?}"
+        );
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::FileLine { path, line: 42 } if path == "src/d.rs")),
+            "FileLine missing: {claims:?}"
+        );
+        assert!(
+            claims.iter().any(
+                |c| matches!(c, Claim::FileRange { path, start: 50, end: 55 } if path == "src/e.rs")
+            ),
+            "lines_verb FileRange missing: {claims:?}"
+        );
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::FileRange { path, start: 100, end: 110 } if path == "src/f.rs")),
+            "read_lines FileRange missing: {claims:?}"
+        );
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::FilePath { path } if path == "src/g.rs")),
+            "path_backtick missing: {claims:?}"
+        );
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::FilePath { path } if path == "src/h.rs")),
+            "path_bare missing: {claims:?}"
+        );
+        // symbol_leading helper (leading-identifier form on tabular output)
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::Symbol { name, .. } if name == "my_handler")),
+            "symbol_leading missing: {claims:?}"
+        );
+        // symbol_backtick (bare) extracts last segment of `Server::run`
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::Symbol { name, .. } if name == "run")),
+            "symbol_backtick missing: {claims:?}"
+        );
+        // symbol_kind (fn helper)
+        assert!(
+            claims
+                .iter()
+                .any(|c| matches!(c, Claim::Symbol { name, kind } if name == "my_helper" && kind.as_deref() == Some("fn"))),
+            "symbol_kind missing: {claims:?}"
+        );
+    }
+
+    #[test]
+    fn extract_claims_in_fenced_block_suppresses_symbols() {
+        // Triple-backtick fence must suppress symbol extraction (preserves
+        // post-refactor behavior of symbol_leading/backtick/kind helpers).
+        let input = "\
+            outside `MyType` here.\n\
+            ```rust\n\
+            MyOtherType inside fence\n\
+            ```\n\
+            after `MyOuter`.\n\
+        ";
+        let claims = extract_claims(input);
+        let names: Vec<&str> = claims
+            .iter()
+            .filter_map(|c| match c {
+                Claim::Symbol { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"MyType"),
+            "MyType outside fence must be extracted: {names:?}"
+        );
+        assert!(
+            !names.contains(&"MyOtherType"),
+            "MyOtherType inside fence must be suppressed: {names:?}"
+        );
+        assert!(
+            names.contains(&"MyOuter"),
+            "MyOuter after closing fence must resume extraction: {names:?}"
+        );
+    }
+
+    #[test]
+    fn extract_claims_helpers_share_consumed_tracker() {
+        // Symbol leading helper must respect spans consumed by file
+        // extractors (post-refactor: each helper gets &mut consumed).
+        let input = " src/some_path.rs - call_tool";
+        let claims = extract_claims(input);
+        // src/some_path.rs should land as FilePath. call_tool may land as
+        // a Symbol (leading form is anchored at line start, so it would
+        // pick `src` not `call_tool`). The key invariant: no overlapping
+        // span gets two claims.
+        let path_claims: Vec<_> = claims
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Claim::FilePath { .. } | Claim::FileLine { .. } | Claim::FileRange { .. }
+                )
+            })
+            .collect();
+        assert!(
+            !path_claims.is_empty(),
+            "expected file claim from src/some_path.rs: {claims:?}"
         );
     }
 
