@@ -430,17 +430,31 @@ impl BenchmarkReport {
         Self::new_with_language(scenarios, default_rust_lang())
     }
 
+    /// Build a report without binding to a specific repo; `git_sha` is
+    /// `None`. The CLI calls [`BenchmarkReport::with_git_sha`] afterward
+    /// with `super::git_sha(&project_root)` so the cache-key SHA matches
+    /// the repo being benchmarked, not the process CWD.
     pub fn new_with_language(scenarios: Vec<ScenarioReport>, language: String) -> Self {
         Self {
             generated_at_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            git_sha: super::git_sha(),
+            git_sha: None,
             tokenizer: "cl100k_base".to_string(),
             language,
             scenarios,
         }
+    }
+
+    /// Attach the HEAD SHA that describes the codebase this report was
+    /// produced against. Kept as a builder so tests can construct
+    /// reports without invoking `git`, while the CLI binary pins the
+    /// SHA to the actual `--project-root` it was handed.
+    #[must_use]
+    pub fn with_git_sha(mut self, sha: Option<String>) -> Self {
+        self.git_sha = sha;
+        self
     }
 }
 
@@ -1341,7 +1355,7 @@ const DIVERGENCE_HIGHLIGHT_PCT: f64 = 20.0;
 ///    present), aggregate savings, and the win/tie/non-MCP/error tally.
 /// 3. **Cross-language divergence** - for each tool, the savings range
 ///    (max minus min across languages). Tools whose range exceeds
-///    [`DIVERGENCE_HIGHLIGHT_PCT`] are flagged because the harness is
+///    `DIVERGENCE_HIGHLIGHT_PCT` are flagged because the harness is
 ///    delivering meaningfully different signals per language and a reader
 ///    should investigate the per-language report before trusting the
 ///    aggregate.

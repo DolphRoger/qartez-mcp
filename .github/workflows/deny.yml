@@ -1,26 +1,28 @@
-name: Security audit
+name: cargo-deny
 
 on:
-  schedule:
-    - cron: "0 6 * * *"
   pull_request:
     paths:
-      - "Cargo.lock"
       - "Cargo.toml"
-      - ".github/workflows/audit.yml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 10 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
-  group: audit-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: deny-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  audit:
-    name: cargo-audit
+  deny:
+    name: cargo-deny
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner
@@ -34,5 +36,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run cargo-audit
-        uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1.2.7
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb  # v2.0.17
+        with:
+          command: check advisories bans licenses sources

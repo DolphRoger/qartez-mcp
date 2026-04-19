@@ -1,6 +1,6 @@
 # Tool reference
 
-Qartez exposes 30 tools via MCP, organized into four tiers. By default all
+Qartez exposes 31 tools via MCP, organized into four tiers. By default all
 tools are available. With `QARTEZ_PROGRESSIVE=1`, only the core tier and
 `qartez_tools` are visible at startup; unlock others on demand.
 
@@ -8,11 +8,11 @@ tools are available. With `QARTEZ_PROGRESSIVE=1`, only the core tier and
 
 | Tier | Tools | Purpose |
 |------|-------|---------|
-| **core** | 8 | Navigate, read, assess — the daily-driver set |
+| **core** | 8 | Navigate, read, assess - the daily-driver set |
 | **analysis** | 16 | Deep investigation, debugging, review, architecture |
 | **refactor** | 3 | Codebase-wide rename and move operations |
-| **meta** | 2 | Build toolchain and documentation generation |
-| **discovery** | 1 | `qartez_tools` — always visible, manages tier visibility |
+| **meta** | 3 | Build toolchain, documentation, workspace admin |
+| **discovery** | 1 | `qartez_tools` - always visible, manages tier visibility |
 
 ---
 
@@ -401,11 +401,25 @@ with module descriptions and file listings.
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `write_to` | string | — | Write to file instead of returning inline |
+| `write_to` | string | - | Write to file instead of returning inline |
 | `resolution` | f64 | 1.0 | Leiden resolution (higher = more clusters) |
 | `min_cluster_size` | u32 | 3 | Minimum files per cluster |
 | `max_files_per_section` | u32 | 20 | Max files listed per cluster |
 | `recompute` | bool | false | Force cluster recomputation |
+
+### `qartez_workspace`
+
+Add or remove workspace domains at runtime without restarting. Registers
+an external directory under a custom alias, indexes it, and wires it into
+the server's in-memory state; the mapping is persisted in
+`.qartez/workspace.toml`. `remove` purges all associated files and symbols
+from the index in one bulk pass.
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `action` | enum | **required** | `add` or `remove` |
+| `alias` | string | **required** | Domain prefix (ASCII letters, digits, `-`, `_`, `.`) |
+| `path` | string | - | Directory to register (required for `add`; `~/` and relative paths allowed) |
 
 ---
 

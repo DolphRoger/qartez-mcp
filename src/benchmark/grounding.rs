@@ -106,7 +106,7 @@ pub struct GroundingScores {
     pub verified_lines: usize,
     /// Verified subset of [`symbol_claims`](Self::symbol_claims).
     pub verified_symbols: usize,
-    /// Up to [`MAX_UNVERIFIED_EXAMPLES`] of the shortest unverified
+    /// Up to `MAX_UNVERIFIED_EXAMPLES` of the shortest unverified
     /// claim strings, for the judge prompt.
     pub unverified: Vec<String>,
     /// `verified / total`, clamped to `[0.0, 1.0]`. Zero when

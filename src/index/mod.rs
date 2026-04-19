@@ -63,7 +63,12 @@ pub fn full_index(conn: &Connection, root: &Path, force: bool) -> Result<()> {
 /// collision on the UNIQUE `files.path` column.
 ///
 /// For single-root mode, delegates to `full_index` with no prefix.
-pub fn full_index_multi(conn: &Connection, roots: &[PathBuf], force: bool) -> Result<()> {
+pub fn full_index_multi(
+    conn: &Connection,
+    roots: &[PathBuf],
+    aliases: &HashMap<PathBuf, String>,
+    force: bool,
+) -> Result<()> {
     if roots.len() <= 1 {
         if let Some(root) = roots.first() {
             return full_index(conn, root, force);
@@ -78,11 +83,15 @@ pub fn full_index_multi(conn: &Connection, roots: &[PathBuf], force: bool) -> Re
     // We insert BOTH the prefixed form (for DB lookups and stale-file
     // detection) and the unprefixed raw form (for import resolvers, which
     // generate candidates relative to a single root).
+    let roots_with_prefixes: Vec<(&PathBuf, String)> = roots
+        .iter()
+        .map(|r| (r, root_prefix(r, aliases.get(r).map(|s| s.as_str()))))
+        .collect();
+
     let mut all_known: HashSet<String> = HashSet::new();
-    for root in roots {
-        let prefix = root_prefix(root);
+    for (root, prefix) in &roots_with_prefixes {
         for file_path in walker::walk_source_files(root) {
-            let raw_rel = match file_path.strip_prefix(root) {
+            let raw_rel = match file_path.strip_prefix(*root) {
                 Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
                 Err(_) => to_forward_slash(file_path.to_string_lossy().into_owned()),
             };
@@ -90,17 +99,24 @@ pub fn full_index_multi(conn: &Connection, roots: &[PathBuf], force: bool) -> Re
             all_known.insert(raw_rel);
         }
     }
-    for root in roots {
-        let prefix = root_prefix(root);
+    for (root, prefix) in &roots_with_prefixes {
         tracing::info!("Indexing root: {} (prefix: {prefix})", root.display());
-        full_index_root(conn, root, force, &prefix, &all_known)?;
+        full_index_root(conn, root, force, prefix, &all_known)?;
     }
     Ok(())
 }
 
 /// Extract the directory name of a root, used as the path prefix in
 /// multi-root mode (e.g. `/home/user/repo-a` -> `"repo-a"`).
-fn root_prefix(root: &Path) -> String {
+///
+/// Exposed at crate scope so the watcher can mirror `full_index_multi`'s
+/// prefix derivation when handing paths back to `incremental_index`. When
+/// an `alias` is provided (via `.qartez/workspace.toml`), it overrides the
+/// folder-name derivation.
+pub fn root_prefix(root: &Path, alias: Option<&str>) -> String {
+    if let Some(a) = alias {
+        return a.to_string();
+    }
     root.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "root".to_string())
@@ -1306,10 +1322,24 @@ fn file_mtime_ns(metadata: &std::fs::Metadata) -> i64 {
 /// edges and symbol references for the changed files, then rebuilds the
 /// global FTS and unused-export tables.
 /// Remove a single deleted file's rows from the index, if present.
-fn delete_single_file(tx: &Connection, root: &Path, path: &Path) -> Result<bool> {
-    let rel_path = match path.strip_prefix(root) {
+///
+/// `path_prefix` must match the root's prefix from [`root_prefix`] in
+/// multi-root mode (empty string for single-root). Without it, the lookup
+/// key would be the raw relative path and the prefixed row would leak.
+fn delete_single_file(
+    tx: &Connection,
+    root: &Path,
+    path_prefix: &str,
+    path: &Path,
+) -> Result<bool> {
+    let raw_rel = match path.strip_prefix(root) {
         Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
         Err(_) => to_forward_slash(path.to_string_lossy().into_owned()),
+    };
+    let rel_path = if path_prefix.is_empty() {
+        raw_rel
+    } else {
+        format!("{path_prefix}/{raw_rel}")
     };
     if let Some(existing) = read::get_file_by_path(tx, &rel_path)? {
         write::delete_file_data(tx, existing.id)?;
@@ -1325,13 +1355,19 @@ fn try_reingest_changed_file(
     tx: &Connection,
     file_path: &Path,
     root: &Path,
+    path_prefix: &str,
     max_bytes: u64,
     pool: &ParserPool,
     indexed: &mut Vec<IndexedFile>,
 ) -> Result<bool> {
-    let rel_path = match file_path.strip_prefix(root) {
+    let raw_rel = match file_path.strip_prefix(root) {
         Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
         Err(_) => to_forward_slash(file_path.to_string_lossy().into_owned()),
+    };
+    let rel_path = if path_prefix.is_empty() {
+        raw_rel.clone()
+    } else {
+        format!("{path_prefix}/{raw_rel}")
     };
 
     let metadata = match std::fs::metadata(file_path) {
@@ -1371,8 +1407,8 @@ fn try_reingest_changed_file(
 
     ingest_parsed_file(
         tx,
-        rel_path.clone(),
         rel_path,
+        raw_rel,
         mtime_ns,
         size_bytes,
         &source,
@@ -1384,9 +1420,25 @@ fn try_reingest_changed_file(
     Ok(true)
 }
 
+/// Incremental re-index for single-root projects. Delegates to
+/// [`incremental_index_with_prefix`] with an empty prefix so existing
+/// callers and tests keep the original signature.
 pub fn incremental_index(
     conn: &Connection,
     root: &Path,
+    changed: &[PathBuf],
+    deleted: &[PathBuf],
+) -> Result<()> {
+    incremental_index_with_prefix(conn, root, "", changed, deleted)
+}
+
+/// Incremental re-index for a single root. `path_prefix` is the same
+/// prefix that [`full_index_multi`] used for this root (from
+/// [`root_prefix`]); pass `""` when there is only one root in the project.
+pub fn incremental_index_with_prefix(
+    conn: &Connection,
+    root: &Path,
+    path_prefix: &str,
     changed: &[PathBuf],
     deleted: &[PathBuf],
 ) -> Result<()> {
@@ -1404,7 +1456,7 @@ pub fn incremental_index(
     // --- Phase 1: remove deleted files ---
     let mut removed = 0usize;
     for path in deleted {
-        if delete_single_file(&tx, root, path)? {
+        if delete_single_file(&tx, root, path_prefix, path)? {
             removed += 1;
         }
     }
@@ -1414,7 +1466,15 @@ pub fn incremental_index(
     let mut updated = 0usize;
 
     for file_path in changed {
-        if try_reingest_changed_file(&tx, file_path, root, max_bytes, &pool, &mut indexed)? {
+        if try_reingest_changed_file(
+            &tx,
+            file_path,
+            root,
+            path_prefix,
+            max_bytes,
+            &pool,
+            &mut indexed,
+        )? {
             updated += 1;
         }
     }
@@ -3110,7 +3170,7 @@ mod tests {
         let conn = open_test_conn();
         let tx = conn.unchecked_transaction().unwrap();
 
-        let result = delete_single_file(&tx, root, &root.join("never_indexed.ts")).unwrap();
+        let result = delete_single_file(&tx, root, "", &root.join("never_indexed.ts")).unwrap();
         assert!(!result);
     }
 
@@ -3125,7 +3185,7 @@ mod tests {
         assert!(read::get_file_by_path(&conn, "a.ts").unwrap().is_some());
 
         let tx = conn.unchecked_transaction().unwrap();
-        let removed = delete_single_file(&tx, root, &root.join("a.ts")).unwrap();
+        let removed = delete_single_file(&tx, root, "", &root.join("a.ts")).unwrap();
         tx.commit().unwrap();
 
         assert!(removed);
@@ -3145,6 +3205,7 @@ mod tests {
             &tx,
             &root.join("missing.ts"),
             root,
+            "",
             max_file_bytes(),
             &pool,
             &mut indexed,
@@ -3167,9 +3228,16 @@ mod tests {
         let pool = ParserPool::new();
         let mut indexed: Vec<IndexedFile> = Vec::new();
 
-        let result =
-            try_reingest_changed_file(&tx, &file_path, root, max_file_bytes(), &pool, &mut indexed)
-                .unwrap();
+        let result = try_reingest_changed_file(
+            &tx,
+            &file_path,
+            root,
+            "",
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+        )
+        .unwrap();
         tx.commit().unwrap();
 
         assert!(result);
@@ -3189,9 +3257,81 @@ mod tests {
         let mut indexed: Vec<IndexedFile> = Vec::new();
 
         let result =
-            try_reingest_changed_file(&tx, &file_path, root, 5, &pool, &mut indexed).unwrap();
+            try_reingest_changed_file(&tx, &file_path, root, "", 5, &pool, &mut indexed).unwrap();
 
         assert!(!result);
         assert!(indexed.is_empty());
+    }
+
+    // --- Multi-root prefix behavior --------------------------------------
+    //
+    // Regression tests for the bug where `incremental_index` wrote rows
+    // without the per-root prefix that `full_index_multi` uses, orphaning
+    // the original prefixed row on the first save in multi-root mode.
+
+    #[test]
+    fn incremental_index_with_prefix_writes_prefixed_row() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root2");
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("foo.ts");
+        fs::write(&file, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        // Simulate the full_index_multi pass: the DB already has a row at
+        // "root2/foo.ts" because that is how full_index_multi keys rows.
+        let prefix = root_prefix(&root, None);
+        full_index_root(&conn, &root, true, &prefix, &HashSet::new()).unwrap();
+        assert!(
+            read::get_file_by_path(&conn, &format!("{prefix}/foo.ts"))
+                .unwrap()
+                .is_some(),
+            "full_index_multi must store the prefixed path"
+        );
+
+        // Save event: rewrite the file, re-run incremental with the same
+        // prefix, and confirm the existing prefixed row is the one updated
+        // (no orphan "foo.ts" row is created).
+        fs::write(&file, "export const x = 2;\n").unwrap();
+        incremental_index_with_prefix(&conn, &root, &prefix, &[file.clone()], &[]).unwrap();
+
+        assert!(
+            read::get_file_by_path(&conn, &format!("{prefix}/foo.ts"))
+                .unwrap()
+                .is_some(),
+            "prefixed row must remain after incremental save"
+        );
+        assert!(
+            read::get_file_by_path(&conn, "foo.ts").unwrap().is_none(),
+            "incremental must not write an unprefixed orphan"
+        );
+    }
+
+    #[test]
+    fn incremental_index_with_prefix_deletes_prefixed_row() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root2");
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("foo.ts");
+        fs::write(&file, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let prefix = root_prefix(&root, None);
+        full_index_root(&conn, &root, true, &prefix, &HashSet::new()).unwrap();
+        assert!(
+            read::get_file_by_path(&conn, &format!("{prefix}/foo.ts"))
+                .unwrap()
+                .is_some()
+        );
+
+        fs::remove_file(&file).unwrap();
+        incremental_index_with_prefix(&conn, &root, &prefix, &[], &[file]).unwrap();
+
+        assert!(
+            read::get_file_by_path(&conn, &format!("{prefix}/foo.ts"))
+                .unwrap()
+                .is_none(),
+            "delete path must match the prefix to actually remove the row"
+        );
     }
 }

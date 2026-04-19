@@ -1,6 +1,6 @@
 //! Per-tool comparative benchmark harness for Qartez MCP.
 //!
-//! Measures each of the 17 MCP tools against the equivalent non-MCP
+//! Measures each MCP tool against the equivalent non-MCP
 //! workflow (`Glob`/`Grep`/`Read` as a Claude Code agent would run
 //! them) and emits a per-tool matrix with token savings, latency, and
 //! hand-authored verdicts.
@@ -30,7 +30,7 @@ pub use targets::ResolvedTargets;
 
 /// Configuration for the latency measurement loop.
 ///
-/// Defaults are tuned for the small 17-scenario matrix on a live `.qartez`
+/// Defaults are tuned for the scenario matrix on a live `.qartez`
 /// database: 3 warmup runs to prime any lazy state, 7 measured runs, and
 /// min/max trimming to absorb occasional cache-miss spikes. The resulting
 /// 5 post-trim samples are enough to detect 10% efficiency regressions
@@ -386,11 +386,19 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
 }
 
-/// Returns the short Git SHA of the current HEAD, or `None` if the
-/// `git` command is unavailable, the working directory is not a Git
-/// repository, or the output is empty.
-pub fn git_sha() -> Option<String> {
+/// Returns the short Git SHA of HEAD resolved from `project_root`, or
+/// `None` if the `git` command is unavailable, the directory is not a
+/// Git repository, or the output is empty.
+///
+/// The `project_root` argument pins the lookup to the repo the caller
+/// actually cares about. Relying on the process CWD (as the previous
+/// signature did) meant that invoking `qartez bench` from outside the
+/// checkout - or from inside an unrelated repo - either returned `None`
+/// or, worse, a foreign SHA that silently invalidated or reused the
+/// benchmark cache against the wrong commit.
+pub fn git_sha(project_root: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
+        .current_dir(project_root)
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()?;
@@ -411,12 +419,20 @@ mod tests {
     /// short-SHA length.
     #[test]
     fn git_sha_returns_some_or_none_without_panic() {
-        let result: Option<String> = git_sha();
+        let result: Option<String> = git_sha(Path::new("."));
         if let Some(sha) = result {
             assert!(
                 sha.len() >= 4,
                 "git short SHA should be at least 4 chars, got {sha:?}"
             );
         }
+    }
+
+    /// A non-existent root must not panic - `current_dir` resolution
+    /// failure is surfaced as `None`, same as the "no git" branch.
+    #[test]
+    fn git_sha_missing_root_returns_none_without_panic() {
+        let missing = Path::new("/nonexistent/qartez/benchmark/root/does/not/exist");
+        assert!(git_sha(missing).is_none());
     }
 }

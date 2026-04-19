@@ -10,7 +10,7 @@
   </p>
   <p align="center">
     <a href="#quickstart">Quickstart</a> ·
-    <a href="#the-30-tools">30 Tools</a> ·
+    <a href="#the-31-tools">31 Tools</a> ·
     <a href="#modification-guard">Guard</a> ·
     <a href="#benchmarks">Benchmarks</a> ·
     <a href="#comparison-with-alternatives">Comparison</a> ·
@@ -24,7 +24,7 @@
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-dual-blue.svg"></a>
     <img alt="MSRV 1.88" src="https://img.shields.io/badge/MSRV-1.88-orange.svg">
     <img alt="37 languages" src="https://img.shields.io/badge/languages-37-green.svg">
-    <img alt="30 MCP tools" src="https://img.shields.io/badge/MCP_tools-30-purple.svg">
+    <img alt="31 MCP tools" src="https://img.shields.io/badge/MCP_tools-31-purple.svg">
   </p>
 </p>
 
@@ -197,7 +197,7 @@ The result: your AI works faster, uses fewer tokens, refactors safely, and stops
 
 ---
 
-## The 30 tools
+## The 31 tools
 
 Think of these as the **standard library for AI code understanding**. Each one replaces a multi-step human workflow with a single, token-efficient call the agent can reason about.
 
@@ -251,6 +251,7 @@ Tools are organized into **tiers** with progressive disclosure. Core tools are a
 |---|---|
 | `qartez_project` | Auto-detects your toolchain (Cargo, npm/bun/yarn, Go, Python, Make, Gradle) and runs test/build/lint/typecheck through a single tool. |
 | `qartez_wiki` | Generates a markdown architecture wiki using Leiden community detection on the import graph. Partitions files into clusters, names each one, and emits `ARCHITECTURE.md` with inter-cluster edges. |
+| `qartez_workspace` | Add or remove workspace domains at runtime. Registers external directories under a custom alias in `.qartez/workspace.toml`, indexes them, and purges them on removal. |
 
 ### Tier management
 

@@ -50,7 +50,12 @@ async fn main() -> anyhow::Result<()> {
             // Wiki generation depends on a fresh index + pagerank + co-change,
             // and the CLI caller is explicitly waiting for the output file.
             // Keep this path synchronous.
-            index::full_index_multi(&conn, &config.project_roots, config.reindex)?;
+            index::full_index_multi(
+                &conn,
+                &config.project_roots,
+                &config.root_aliases,
+                config.reindex,
+            )?;
             graph::pagerank::compute_pagerank(&conn, &Default::default())?;
             graph::pagerank::compute_symbol_pagerank(&conn, &Default::default())?;
             git::cochange::analyze_cochanges(
@@ -104,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
             // run (empty on first-ever start).
             let db_path = config.db_path.clone();
             let project_roots = config.project_roots.clone();
+            let root_aliases = config.root_aliases.clone();
             let primary_root = config.primary_root.clone();
             let reindex = config.reindex;
             let git_depth = config.git_depth;
@@ -115,7 +121,9 @@ async fn main() -> anyhow::Result<()> {
                         return;
                     }
                 };
-                if let Err(e) = index::full_index_multi(&conn, &project_roots, reindex) {
+                if let Err(e) =
+                    index::full_index_multi(&conn, &project_roots, &root_aliases, reindex)
+                {
                     tracing::error!("background indexer: full_index_multi failed: {e}");
                     return;
                 }
@@ -150,13 +158,23 @@ async fn main() -> anyhow::Result<()> {
         conn,
         config.primary_root,
         config.project_roots.clone(),
+        config.root_aliases.clone(),
         config.git_depth,
     );
 
     if !cli.no_watch && config.has_project {
         let db = server.db_arc();
+        // Multi-root indexing keys rows with a per-root prefix so sibling
+        // roots don't collide on `files.path`. The watcher must mirror
+        // that, otherwise the first save orphans the original prefixed row.
+        let multi_root = config.project_roots.len() > 1;
         for root in config.project_roots.iter() {
-            let watcher = watch::Watcher::new(Arc::clone(&db), root.clone());
+            let prefix = if multi_root {
+                index::root_prefix(root, config.root_aliases.get(root).map(|s| s.as_str()))
+            } else {
+                String::new()
+            };
+            let watcher = watch::Watcher::with_prefix(Arc::clone(&db), root.clone(), prefix);
             let root_display = root.display().to_string();
             tokio::spawn(async move {
                 if let Err(e) = watcher.run().await {

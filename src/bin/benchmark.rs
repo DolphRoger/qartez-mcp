@@ -330,7 +330,7 @@ fn main() -> Result<()> {
         .with_grounding_enabled(effective_grounding);
 
     if let Some(cache_path) = &cli.reuse_non_mcp {
-        let cache = load_non_mcp_cache(cache_path, cli.allow_stale_cache)?;
+        let cache = load_non_mcp_cache(cache_path, &project_root, cli.allow_stale_cache)?;
         runner = runner.with_non_mcp_cache(cache);
     }
 
@@ -343,13 +343,18 @@ fn main() -> Result<()> {
     println!("Completed {} scenario(s).", scenarios.len());
 
     let judge_cache: Option<HashMap<String, judge::CachedJudge>> = match &cli.reuse_judge {
-        Some(cache_path) => Some(load_judge_cache(cache_path, cli.allow_stale_judge_cache)?),
+        Some(cache_path) => Some(load_judge_cache(
+            cache_path,
+            &project_root,
+            cli.allow_stale_judge_cache,
+        )?),
         None => None,
     };
 
     run_scoring(&cli, &mut scenarios, judge_cache.as_ref());
 
-    let report = BenchmarkReport::new_with_language(scenarios, profile.name.to_string());
+    let report = BenchmarkReport::new_with_language(scenarios, profile.name.to_string())
+        .with_git_sha(git_sha(&project_root));
 
     report::write_json(&cli.out_json, &report)
         .with_context(|| format!("write json to {}", cli.out_json.display()))?;
@@ -389,13 +394,14 @@ fn main() -> Result<()> {
 
 fn load_non_mcp_cache(
     cache_path: &Path,
+    project_root: &Path,
     allow_stale: bool,
 ) -> Result<HashMap<String, report::SideReport>> {
     let text = std::fs::read_to_string(cache_path)
         .with_context(|| format!("read non-mcp cache {}", cache_path.display()))?;
     let prior: BenchmarkReport =
         serde_json::from_str(&text).context("parse cached benchmark json")?;
-    let current_sha = git_sha();
+    let current_sha = git_sha(project_root);
     let expected = if allow_stale {
         None
     } else {
@@ -427,13 +433,14 @@ fn load_non_mcp_cache(
 
 fn load_judge_cache(
     cache_path: &Path,
+    project_root: &Path,
     allow_stale: bool,
 ) -> Result<HashMap<String, judge::CachedJudge>> {
     let text = std::fs::read_to_string(cache_path)
         .with_context(|| format!("read judge cache {}", cache_path.display()))?;
     let prior: BenchmarkReport =
         serde_json::from_str(&text).context("parse cached judge benchmark json")?;
-    let current_sha = git_sha();
+    let current_sha = git_sha(project_root);
     let expected = if allow_stale {
         None
     } else {

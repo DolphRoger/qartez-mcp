@@ -2,7 +2,7 @@
 
 Current/target parity for qartez guard behavior across hosts.
 
-| Behavior | Claude hook (`qartez-guard.sh`) | OpenCode plugin (`opencode-plugin.ts`) | Target |
+| Behavior | Claude hook (`qartez-guard` binary) | OpenCode plugin (`opencode-plugin.ts`) | Target |
 |---|---|---|---|
 | Block `glob` on code tasks | Yes | Yes | Parity |
 | Block `grep` on code tasks | Yes | Yes | Parity |

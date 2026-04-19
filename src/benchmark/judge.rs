@@ -329,9 +329,9 @@ pub fn build_prompt(
 /// Parses a single judge response back into a [`PerRunScores`] with
 /// the scores un-swapped to the `(mcp, non_mcp)` orientation based on
 /// `position`. The caller is expected to pass the raw `claude -p` stdout;
-/// any Markdown fences are defensively stripped via [`strip_fence`] in
+/// any Markdown fences are defensively stripped via `strip_fence` in
 /// case the model ignored the prompt's "no fences" rule. Validation
-/// rejects any axis score outside [`AXIS_ANCHORS`] - that is a schema
+/// rejects any axis score outside `AXIS_ANCHORS` - that is a schema
 /// violation the model should never emit under `--json-schema` and we
 /// surface it as an error rather than silently clamping.
 pub fn parse_judge_response(raw: &str, position: Position, run_index: u8) -> Result<PerRunScores> {
@@ -418,7 +418,7 @@ fn snap_to_anchor(mean: f64) -> u8 {
 
 /// Aggregates a set of self-consistency runs into a single per-side
 /// pair. The mean is computed per axis in `f64`, then snapped back onto
-/// the nearest [`AXIS_ANCHORS`] value so the result stays in the legal
+/// the nearest `AXIS_ANCHORS` value so the result stays in the legal
 /// rubric range. An empty `runs` slice returns two zero-filled
 /// [`SideQuality`] and does not panic - an empty run set is a
 /// legitimate state when every `claude -p` call failed and the caller
@@ -752,7 +752,7 @@ fn run_judge_subprocess(prompt: &str, model: &str) -> Result<String> {
 /// # Errors
 ///
 /// - Either side has an error or both sides are empty.
-/// - Any of the `2 * n` `claude -p` calls fails after [`RETRY_ATTEMPTS`]
+/// - Any of the `2 * n` `claude -p` calls fails after `RETRY_ATTEMPTS`
 ///   retries.
 /// - A response fails JSON parse or axis-anchor validation.
 pub fn score_scenario(
@@ -1115,10 +1115,10 @@ pub fn abs_delta_per_axis(a: &QualityScores, b: &QualityScores) -> Vec<f64> {
 }
 
 /// Per-axis elementwise mean of two [`SideQuality`] values, snapped
-/// back onto the nearest anchor in [`AXIS_ANCHORS`]. Used when the
+/// back onto the nearest anchor in `AXIS_ANCHORS`. Used when the
 /// primary and secondary judges agree (`abs_delta <= τ`) to produce a
 /// single final `SideQuality` for the Matrix column. Reuses the
-/// slice-A private [`snap_to_anchor`] so the rounding rule is identical
+/// slice-A private `snap_to_anchor` so the rounding rule is identical
 /// across both call sites.
 pub fn elementwise_mean_side(a: &SideQuality, b: &SideQuality) -> SideQuality {
     let mean = |x: u8, y: u8| (f64::from(x) + f64::from(y)) / 2.0;
@@ -1301,7 +1301,7 @@ fn score_arbiter_scenario(
 /// # Errors
 ///
 /// Propagated from the underlying [`score_scenario`] and
-/// [`score_arbiter_scenario`] calls. Any subprocess spawn failure,
+/// `score_arbiter_scenario` calls. Any subprocess spawn failure,
 /// non-zero exit, schema-violation parse error, or tool-error side
 /// gate terminates the scenario's ensemble scoring.
 #[allow(
@@ -1400,7 +1400,7 @@ pub fn score_ensemble_scenario(
 /// # Errors
 ///
 /// Propagated from the underlying [`score_scenario`] (secondary)
-/// and [`score_arbiter_scenario`] calls.
+/// and `score_arbiter_scenario` calls.
 #[allow(
     clippy::too_many_arguments,
     reason = "ensemble fast-path; flattening would require a config struct used only here"

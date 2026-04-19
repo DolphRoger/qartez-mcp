@@ -8,7 +8,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use qartez_mcp::cli::{Command, OutputFormat};
+use qartez_mcp::cli::{Command, OutputFormat, WorkspaceAction};
 use qartez_mcp::cli_runner;
 use qartez_mcp::config::Config;
 
@@ -38,6 +38,7 @@ impl Formatter for Settings {
 
     let config = Config {
         project_roots: vec![dir.path().to_path_buf()],
+        root_aliases: std::collections::HashMap::new(),
         primary_root: dir.path().to_path_buf(),
         db_path: db_dir.join("index.db"),
         reindex: false,
@@ -289,6 +290,7 @@ fn cli_stats_no_project() {
     fs::create_dir_all(&db_dir).unwrap();
     let config = Config {
         project_roots: vec![dir.path().to_path_buf()],
+        root_aliases: std::collections::HashMap::new(),
         primary_root: dir.path().to_path_buf(),
         db_path: db_dir.join("index.db"),
         reindex: false,
@@ -301,5 +303,123 @@ fn cli_stats_no_project() {
         result.is_ok(),
         "stats on empty index should not panic: {:?}",
         result.err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// qartez_workspace: round-trip add -> query -> remove -> query
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_workspace_add_remove_roundtrip() {
+    // Primary project with a Rust source file.
+    let (primary_dir, mut config) = make_project();
+
+    // Secondary "external" directory that we will register as a workspace.
+    let extra = TempDir::new().unwrap();
+    let extra_src = extra.path().join("src");
+    fs::create_dir_all(&extra_src).unwrap();
+    fs::write(
+        extra_src.join("extra.rs"),
+        "pub fn outsider() -> u32 { 42 }\n",
+    )
+    .unwrap();
+
+    // Use a stable, reindexable DB across the three CLI invocations.
+    config.reindex = true;
+
+    // add
+    let add = Command::Workspace {
+        action: WorkspaceAction::Add,
+        alias: "Extra".into(),
+        path: Some(extra.path().to_string_lossy().into_owned()),
+    };
+    let result = cli_runner::run(&config, &add, OutputFormat::Compact);
+    assert!(result.is_ok(), "workspace add failed: {:?}", result.err());
+
+    // workspace.toml must now contain the alias.
+    let ws_toml = primary_dir.path().join(".qartez").join("workspace.toml");
+    let ws_contents = fs::read_to_string(&ws_toml).expect("workspace.toml should be written");
+    assert!(
+        ws_contents.contains("Extra"),
+        "workspace.toml missing alias: {ws_contents}"
+    );
+
+    // Simulate what a fresh CLI invocation would load from workspace.toml so
+    // the in-memory alias map reflects the persisted state from the add above.
+    let canonical_extra = extra.path().canonicalize().unwrap();
+    config
+        .root_aliases
+        .insert(canonical_extra.clone(), "Extra".to_string());
+    if !config.project_roots.contains(&canonical_extra) {
+        config.project_roots.push(canonical_extra.clone());
+    }
+
+    // Re-adding the same path under a different alias must be rejected so the
+    // on-disk and in-memory state do not diverge.
+    let add_conflict = Command::Workspace {
+        action: WorkspaceAction::Add,
+        alias: "Dup".into(),
+        path: Some(extra.path().to_string_lossy().into_owned()),
+    };
+    let conflict = cli_runner::run(&config, &add_conflict, OutputFormat::Compact);
+    assert!(
+        conflict.is_err(),
+        "re-adding same path under different alias must fail"
+    );
+
+    // remove
+    let remove = Command::Workspace {
+        action: WorkspaceAction::Remove,
+        alias: "Extra".into(),
+        path: None,
+    };
+    let result = cli_runner::run(&config, &remove, OutputFormat::Compact);
+    assert!(
+        result.is_ok(),
+        "workspace remove failed: {:?}",
+        result.err()
+    );
+
+    // After remove, the alias line must be gone from workspace.toml.
+    let ws_after = fs::read_to_string(&ws_toml).expect("workspace.toml should still exist");
+    assert!(
+        !ws_after.contains("\"Extra\"") && !ws_after.contains("Extra ="),
+        "alias not purged from workspace.toml: {ws_after}"
+    );
+
+    // Simulate a fresh CLI invocation reading the now-cleaned workspace.toml.
+    config.root_aliases.remove(&canonical_extra);
+    config.project_roots.retain(|r| r != &canonical_extra);
+
+    // Removing again must now fail with a clear error, not panic.
+    let remove_again = Command::Workspace {
+        action: WorkspaceAction::Remove,
+        alias: "Extra".into(),
+        path: None,
+    };
+    let gone = cli_runner::run(&config, &remove_again, OutputFormat::Compact);
+    assert!(
+        gone.is_err(),
+        "removing an already-removed alias must fail cleanly"
+    );
+}
+
+#[test]
+fn cli_workspace_rejects_unsafe_alias() {
+    let (_dir, mut config) = make_project();
+    config.reindex = true;
+
+    let extra = TempDir::new().unwrap();
+    let add = Command::Workspace {
+        action: WorkspaceAction::Add,
+        // `%` is a LIKE metacharacter; it must never reach delete_files_by_prefix.
+        alias: "Bad%Alias".into(),
+        path: Some(extra.path().to_string_lossy().into_owned()),
+    };
+    let result = cli_runner::run(&config, &add, OutputFormat::Compact);
+    assert!(
+        result.is_err(),
+        "alias with LIKE metacharacter must be rejected"
     );
 }

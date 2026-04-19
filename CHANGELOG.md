@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0] - 2026-04-19
+
+### Added
+
+- **`qartez_workspace` tool and `.qartez/workspace.toml`** - declarative multi-root workspace config plus a runtime MCP tool and `qartez workspace` CLI subcommand to add or remove project domains without a server restart. Adding a domain re-runs indexing, PageRank, symbol PageRank, and co-change analysis for the new root; removing a domain bulk-purges its files and symbols from the index. Aliases are validated against SQL LIKE metacharacters (`%`, `_`) so bulk-purge stays scoped to the intended prefix. Tool count grows from 30 to 31; `qartez_workspace` lives in the Meta tier because it mutates on-disk config and the index.
+- **SLSA Build L3 provenance on release archives** - every `tar.xz`, `zip`, and `SHA256SUMS` attached to a GitHub Release is now signed with `actions/attest-build-provenance`. Verify with `gh attestation verify <file> -R kuberstar/qartez-mcp`.
+- **`cargo-deny` workflow** - advisories, bans, licenses, and sources run on PRs touching `Cargo.{toml,lock}` or `deny.toml`, on pushes to main, and weekly. `deny.toml` pins the v2 schema and ignores `RUSTSEC-2024-0436` (transitive `paste` via `tokenizers`) pending upstream replacement.
+- **`harden-runner` audit mode on every Linux job** - `step-security/harden-runner` prepended across all workflows to feed egress telemetry into Scorecard without blocking any network traffic.
+- **`cargo doc` lint on CI** - `cargo doc --locked --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings` catches broken intra-doc links on every push.
+
+### Changed
+
+- **Setup pre-release comparison** - `parse_semver` now tracks a stability flag so `is_newer_version` treats a stable release as newer than the matching pre-release. A user on `1.2.3-beta` now sees `1.2.3` as the upgrade target instead of staying pinned forever.
+- **`release.sh` / `prerelease.sh` portability** - replaced macOS-only `sed -i ''` with `perl -pi -e` so both scripts run unchanged on Linux CI. Co-author filter uses `grep -iwvE` for word-boundary matches.
+- **Legacy `qartez-guard.sh` removed** - the shell hook was replaced by the `qartez-guard` binary in v0.7.0; `qartez-setup` now removes the stale shell script on install.
+
+### Fixed
+
+- **Multi-root file watcher orphaned prefixed rows** - the incremental watcher wrote rows without the per-root path prefix that `full_index_multi` uses. In multi-root mode the first save left the original prefixed row unreferenced. `delete_single_file`, `try_reingest_changed_file`, and the new `incremental_index_with_prefix` now thread the prefix through; `main.rs` derives it via `root_prefix()` when more than one root is configured.
+- **`qartez_rename` non-AST preview produced incomplete replacements** - the word-boundary branch pushed one row per hit, each with a `new_line` that replaced only that single site. Two or more occurrences on the same line now produce a single row with all occurrences replaced.
+- **`git_sha` used the current working directory** - it now runs from the project root so the reported SHA matches the indexed repo instead of whatever directory the server was spawned in.
+- **`renderRadar` and `Dogfood` panicked on empty inputs** - both now guard zero-item cases before rendering.
+- **Poisoned-lock panic in `build_overview`** - replaced `.read().unwrap()` with an explicit error path so overview generation surfaces a readable lock error instead of aborting the server.
+
+### Contributors
+
+- **Rudolf Troger** ([@DolphRoger](https://github.com/DolphRoger)) - designed and implemented `workspace.toml` support and the `qartez_workspace` MCP tool / CLI subcommand, including alias validation, domain-scoped bulk purge, and the round-trip integration test (#19).
+
 ## [0.7.3] - 2026-04-18
 
 ### Added

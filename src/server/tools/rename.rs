@@ -78,10 +78,18 @@ impl QartezServer {
 
         // Files where we actually found a rename target. Kept separate
         // from `files_to_scan` because the FTS-based scan set is
-        // deliberately generous — it includes files that mention the name
-        // only inside strings or comments — and we must not rewrite those
+        // deliberately generous - it includes files that mention the name
+        // only inside strings or comments - and we must not rewrite those
         // false positives on apply.
         let mut files_touched: Vec<String> = Vec::new();
+
+        // Occurrence counts tracked separately from `changes`. The non-AST
+        // branch collapses multiple word-boundary matches on the same line
+        // into a single preview row whose `new_line` rewrites every site
+        // (via `replace_whole_word`), so `changes.len()` no longer equals
+        // the occurrence count. The summary numbers below read these maps.
+        let mut total_occurrences: usize = 0;
+        let mut per_file_occurrences: HashMap<String, usize> = HashMap::new();
 
         for rel_path in &files_to_scan {
             // Prefer the shared parse cache so repeat invocations (warmup +
@@ -127,11 +135,13 @@ impl QartezServer {
                             changes.push((rel_path.clone(), line_num, old_line, new_line));
                         }
                     }
+                    total_occurrences += occurrences.len();
+                    *per_file_occurrences.entry(rel_path.clone()).or_insert(0) += occurrences.len();
                     ast_ranges.insert(rel_path.clone(), occurrences.clone());
                     files_touched.push(rel_path.clone());
                 }
                 None => {
-                    // Language not supported by tree-sitter — use a
+                    // Language not supported by tree-sitter - use a
                     // word-boundary text scan as the only available signal.
                     let source_arc = self.cached_source(rel_path).ok_or_else(|| {
                         format!("Cannot read {}", self.project_root.join(rel_path).display())
@@ -139,36 +149,18 @@ impl QartezServer {
                     let content: &str = source_arc.as_str();
                     let mut file_had_hit = false;
                     for (line_num, line) in content.lines().enumerate() {
-                        let mut start = 0;
-                        while let Some(pos) = line[start..].find(&params.old_name) {
-                            let abs_pos = start + pos;
-                            let before_ok = line[..abs_pos]
-                                .chars()
-                                .next_back()
-                                .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
-                            let after_pos = abs_pos + params.old_name.len();
-                            let after_ok = line[after_pos..]
-                                .chars()
-                                .next()
-                                .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
-
-                            if before_ok && after_ok {
-                                let new_line = format!(
-                                    "{}{}{}",
-                                    &line[..abs_pos],
-                                    &params.new_name,
-                                    &line[after_pos..],
-                                );
-                                changes.push((
-                                    rel_path.clone(),
-                                    line_num + 1,
-                                    line.to_string(),
-                                    new_line,
-                                ));
-                                file_had_hit = true;
-                            }
-                            start = abs_pos + params.old_name.len();
-                        }
+                        let Some((hits, new_line)) =
+                            scan_line_for_rename(line, &params.old_name, &params.new_name)
+                        else {
+                            continue;
+                        };
+                        // One preview row per line: the line rewritten as
+                        // `apply` would emit it. Counts tracked separately
+                        // so the summary still reports true occurrences.
+                        changes.push((rel_path.clone(), line_num + 1, line.to_string(), new_line));
+                        total_occurrences += hits;
+                        *per_file_occurrences.entry(rel_path.clone()).or_insert(0) += hits;
+                        file_had_hit = true;
                     }
                     if file_had_hit {
                         files_touched.push(rel_path.clone());
@@ -226,24 +218,25 @@ impl QartezServer {
             out.push_str(&format!(
                 "{} file(s) modified, {} occurrence(s) replaced:\n",
                 files_modified.len(),
-                changes.len(),
+                total_occurrences,
             ));
             for f in &files_modified {
-                let count = changes.iter().filter(|(p, _, _, _)| p == f).count();
+                let count = per_file_occurrences.get(f).copied().unwrap_or(0);
                 out.push_str(&format!("  {f} ({count} changes)\n"));
             }
             Ok(out)
         } else {
-            // Compact preview: "old → new: N occurrences in M files", then
-            // for each file a single line per occurrence with just the line
-            // number and the trimmed after-text. The before-line is omitted
-            // (reader has the file) — delivers the same actionable info at
-            // ~40% fewer tokens than the diff-style output used previously.
+            // Compact preview: "old -> new: N occurrences in M files", then
+            // for each file a single line per changed line with just the
+            // line number and the trimmed after-text. The before-line is
+            // omitted (reader has the file) - delivers the same actionable
+            // info at ~40% fewer tokens than the diff-style output used
+            // previously.
             let mut out = format!(
                 "{} → {}: {} occ in {} file(s)\n",
                 params.old_name,
                 params.new_name,
-                changes.len(),
+                total_occurrences,
                 files_touched.len(),
             );
             let mut current_file = String::new();
@@ -256,5 +249,75 @@ impl QartezServer {
             }
             Ok(out)
         }
+    }
+}
+
+/// Count whole-word occurrences of `old` in `line` and, when at least one
+/// hit is found, return the fully-rewritten line (mirroring what the apply
+/// step writes via `replace_whole_word`). Returns `None` for lines with no
+/// word-boundary hit so callers can skip them cheaply.
+///
+/// Extracted from the non-AST branch of `qartez_rename` so the per-line
+/// logic is unit-testable without standing up a full `QartezServer` with a
+/// database. The behavior mirrors the previous inline loop except that
+/// multiple matches on the same line now produce a single rewritten line
+/// rather than one divergent `new_line` per site.
+fn scan_line_for_rename(line: &str, old: &str, new: &str) -> Option<(usize, String)> {
+    if old.is_empty() {
+        return None;
+    }
+    let mut hits = 0usize;
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(old) {
+        let abs_pos = start + pos;
+        let before_ok = line[..abs_pos]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+        let after_pos = abs_pos + old.len();
+        let after_ok = line[after_pos..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+        if before_ok && after_ok {
+            hits += 1;
+        }
+        start = after_pos;
+    }
+    if hits == 0 {
+        None
+    } else {
+        Some((hits, replace_whole_word(line, old, new)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_line_for_rename;
+
+    #[test]
+    fn multi_occurrence_line_returns_single_fully_rewritten_line() {
+        // Regression: previously two separate preview rows were emitted,
+        // each with a `new_line` that replaced only its own site.
+        let (hits, new_line) = scan_line_for_rename("foo foo bar", "foo", "qux").unwrap();
+        assert_eq!(hits, 2);
+        assert_eq!(new_line, "qux qux bar");
+    }
+
+    #[test]
+    fn single_word_boundary_hit_rewrites_that_site() {
+        let (hits, new_line) = scan_line_for_rename("bar foo baz", "foo", "qux").unwrap();
+        assert_eq!(hits, 1);
+        assert_eq!(new_line, "bar qux baz");
+    }
+
+    #[test]
+    fn substring_only_match_is_ignored() {
+        assert!(scan_line_for_rename("foobar", "foo", "qux").is_none());
+    }
+
+    #[test]
+    fn empty_needle_returns_none() {
+        assert!(scan_line_for_rename("foo bar", "", "qux").is_none());
     }
 }
