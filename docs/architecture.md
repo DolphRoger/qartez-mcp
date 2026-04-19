@@ -26,7 +26,7 @@ source files
                                           ▼
                                    ┌────────────┐
                                    │ MCP Server │◀── JSON-RPC (stdio)
-                                   │  30 tools  │
+                                   │  31 tools  │
                                    └────────────┘
 ```
 
@@ -258,6 +258,7 @@ JSON-RPC and CLI subcommand paths to share the same tool implementations.
 ### Progressive disclosure (`src/server/tiers.rs`)
 
 When `QARTEZ_PROGRESSIVE=1` is set, the server starts with only 8 core tools
+(plus `qartez_tools`)
 visible. Additional tiers are unlocked on demand via `qartez_tools`, which
 sends a `notifications/tools/list_changed` MCP notification to the client.
 Without the env var, all tools are visible from the start.

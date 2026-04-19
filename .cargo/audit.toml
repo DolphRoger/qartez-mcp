@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # paste: unmaintained upstream; reached transitively via tokenizers (semantic
+    # feature) and macro_rules_attribute. No drop-in replacement propagated to
+    # our dep graph yet. Tracked by cargo-deny in deny.toml as well.
+    "RUSTSEC-2024-0436",
+]

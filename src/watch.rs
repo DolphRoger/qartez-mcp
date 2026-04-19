@@ -28,11 +28,28 @@ struct WatchBatch {
 pub struct Watcher {
     db: Arc<Mutex<Connection>>,
     project_root: PathBuf,
+    /// Path prefix to prepend to each file's relative path when writing
+    /// index rows. Must match the prefix `full_index_multi` used for this
+    /// root (empty in single-root mode). Without it, incremental rows in
+    /// multi-root projects would orphan the original full-index rows.
+    path_prefix: String,
 }
 
 impl Watcher {
     pub fn new(db: Arc<Mutex<Connection>>, project_root: PathBuf) -> Self {
-        Self { db, project_root }
+        Self::with_prefix(db, project_root, String::new())
+    }
+
+    pub fn with_prefix(
+        db: Arc<Mutex<Connection>>,
+        project_root: PathBuf,
+        path_prefix: String,
+    ) -> Self {
+        Self {
+            db,
+            project_root,
+            path_prefix,
+        }
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -87,7 +104,13 @@ impl Watcher {
 
     fn reindex(&self, changed: &[PathBuf], deleted: &[PathBuf]) -> anyhow::Result<()> {
         let conn = self.db.lock().expect("watcher db mutex poisoned");
-        index::incremental_index(&conn, &self.project_root, changed, deleted)?;
+        index::incremental_index_with_prefix(
+            &conn,
+            &self.project_root,
+            &self.path_prefix,
+            changed,
+            deleted,
+        )?;
         graph::pagerank::compute_pagerank(&conn, &Default::default())?;
         graph::pagerank::compute_symbol_pagerank(&conn, &Default::default())?;
         Ok(())

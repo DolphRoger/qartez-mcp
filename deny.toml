@@ -1,28 +1,49 @@
 [graph]
-all-features = false
+all-features = true
 
 [advisories]
-db-path = "~/.cargo/advisory-db"
-db-urls = ["https://github.com/RustSec/advisory-db"]
-yanked = "warn"
+version = 2
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained upstream; reached transitively via tokenizers, no drop-in replacement available yet" },
+]
 
 [licenses]
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "MPL-2.0",
+    "CC0-1.0",
     "Zlib",
 ]
-confidence-threshold = 0.8
+confidence-threshold = 0.93
+
+[[licenses.clarify]]
+name = "qartez-mcp"
+expression = "LicenseRef-Qartez-Small-Team"
+license-files = [
+    { path = "LICENSE", hash = 0x94e84f36 },
+]
+
+[[licenses.exceptions]]
+name = "qartez-mcp"
+allow = ["LicenseRef-Qartez-Small-Team"]
+
+[[licenses.exceptions]]
+name = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "warn"
+wildcards = "deny"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

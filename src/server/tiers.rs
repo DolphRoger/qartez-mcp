@@ -51,8 +51,13 @@ pub(super) const TIER_ANALYSIS: &[&str] = &[
 /// Destructive refactoring tools unlocked on demand.
 pub(super) const TIER_REFACTOR: &[&str] = &["qartez_rename", "qartez_move", "qartez_rename_file"];
 
-/// Build and documentation meta-tools.
-pub(super) const TIER_META: &[&str] = &["qartez_project", "qartez_wiki"];
+/// Build, documentation, and project-admin meta-tools.
+///
+/// `qartez_workspace` lives here (not in core) because it mutates
+/// `.qartez/workspace.toml`, rewrites in-memory `project_roots`, and can
+/// bulk-delete from the index — configuration actions, not the daily
+/// navigate/read/assess loop.
+pub(super) const TIER_META: &[&str] = &["qartez_project", "qartez_wiki", "qartez_workspace"];
 
 /// The `qartez_tools` discovery tool is always visible regardless of mode.
 pub(super) const META_TOOL_NAME: &str = "qartez_tools";

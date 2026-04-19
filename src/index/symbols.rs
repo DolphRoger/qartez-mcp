@@ -233,7 +233,7 @@ pub struct ParseResult {
 /// but different names/values produce the same hash (Type-I and Type-II clones
 /// in the clone-detection taxonomy).
 ///
-/// Returns `None` for symbols shorter than [`SHAPE_HASH_MIN_LINES`] or whose
+/// Returns `None` for symbols shorter than `SHAPE_HASH_MIN_LINES` or whose
 /// normalized form is too short to be meaningful.
 pub fn compute_shape_hash(source: &[u8], line_start: u32, line_end: u32) -> Option<String> {
     let body_lines = line_end.saturating_sub(line_start) + 1;

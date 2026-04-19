@@ -2911,17 +2911,32 @@ fn acquire_update_lock() -> Option<fs::File> {
     }
 }
 
-fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+// SemVer §11: a pre-release version has lower precedence than the
+// corresponding normal version. Encoding stability as a trailing u8 (1 for
+// stable, 0 for pre-release) lets lexicographic tuple compare do the right
+// thing for free.
+const STABILITY_STABLE: u8 = 1;
+const STABILITY_PRE_RELEASE: u8 = 0;
+
+fn parse_semver(s: &str) -> Option<(u32, u32, u32, u8)> {
     let s = s.trim().trim_start_matches('v');
-    let core = s.split('-').next().unwrap_or(s);
+    let (core, pre) = match s.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (s, None),
+    };
     let parts: Vec<&str> = core.split('.').collect();
     if parts.len() != 3 {
         return None;
     }
+    let stability = match pre {
+        Some(tag) if !tag.is_empty() => STABILITY_PRE_RELEASE,
+        _ => STABILITY_STABLE,
+    };
     Some((
         parts[0].parse().ok()?,
         parts[1].parse().ok()?,
         parts[2].parse().ok()?,
+        stability,
     ))
 }
 
@@ -3186,11 +3201,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_semver_strips_v_prefix_and_pre_release() {
-        assert_eq!(parse_semver("0.1.1"), Some((0, 1, 1)));
-        assert_eq!(parse_semver("v0.1.1"), Some((0, 1, 1)));
-        assert_eq!(parse_semver("v1.2.3-rc1"), Some((1, 2, 3)));
-        assert_eq!(parse_semver(" v0.1.1 "), Some((0, 1, 1)));
+    fn parse_semver_strips_v_prefix_and_records_stability() {
+        assert_eq!(parse_semver("0.1.1"), Some((0, 1, 1, STABILITY_STABLE)));
+        assert_eq!(parse_semver("v0.1.1"), Some((0, 1, 1, STABILITY_STABLE)));
+        assert_eq!(
+            parse_semver("v1.2.3-rc1"),
+            Some((1, 2, 3, STABILITY_PRE_RELEASE))
+        );
+        assert_eq!(parse_semver(" v0.1.1 "), Some((0, 1, 1, STABILITY_STABLE)));
     }
 
     #[test]
@@ -3343,9 +3361,15 @@ mod tests {
 
     #[test]
     fn parse_semver_handles_large_and_zero_components() {
-        assert_eq!(parse_semver("0.0.0"), Some((0, 0, 0)));
-        assert_eq!(parse_semver("999.999.999"), Some((999, 999, 999)));
-        assert_eq!(parse_semver("v100.0.0-beta.1"), Some((100, 0, 0)));
+        assert_eq!(parse_semver("0.0.0"), Some((0, 0, 0, STABILITY_STABLE)));
+        assert_eq!(
+            parse_semver("999.999.999"),
+            Some((999, 999, 999, STABILITY_STABLE))
+        );
+        assert_eq!(
+            parse_semver("v100.0.0-beta.1"),
+            Some((100, 0, 0, STABILITY_PRE_RELEASE))
+        );
     }
 
     #[test]
@@ -3361,6 +3385,17 @@ mod tests {
     fn is_newer_prerelease_compared_by_core_version() {
         assert!(!is_newer_version("v1.0.0-rc1", "1.0.0"));
         assert!(is_newer_version("v1.0.1-beta", "1.0.0"));
+    }
+
+    #[test]
+    fn is_newer_stable_beats_matching_pre_release() {
+        // A user on 1.2.3-beta must upgrade to the matching stable 1.2.3.
+        assert!(is_newer_version("1.2.3", "1.2.3-beta"));
+        // The reverse must never trigger an "update".
+        assert!(!is_newer_version("1.2.3-beta", "1.2.3"));
+        // Baseline core-version comparisons keep working.
+        assert!(is_newer_version("1.2.4", "1.2.3"));
+        assert!(!is_newer_version("1.2.3", "1.2.3"));
     }
 
     #[test]
