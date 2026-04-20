@@ -1326,6 +1326,111 @@ fn file_mtime_ns(metadata: &std::fs::Metadata) -> i64 {
 /// `path_prefix` must match the root's prefix from [`root_prefix`] in
 /// multi-root mode (empty string for single-root). Without it, the lookup
 /// key would be the raw relative path and the prefixed row would leak.
+/// A `symbol_refs` row whose `to_symbol_id` will be wiped by the
+/// about-to-run `clear_file_content` cascade. The snapshot records enough
+/// to re-link the ref to the new symbol id (`(to_file, to_name, to_kind)`
+/// identifies the target across the re-ingest, and `from_symbol_id` is
+/// stable because the caller lives in an unchanged file).
+struct PreservedRef {
+    from_symbol_id: i64,
+    to_file_path: String,
+    to_name: String,
+    to_kind: String,
+    ref_kind: String,
+}
+
+/// Snapshot every `symbol_refs` row whose `to_symbol_id` is in a file that
+/// is about to be re-ingested while the `from_symbol_id` lives in a file
+/// that is NOT being re-ingested. Those are the rows that CASCADE would
+/// delete and `resolve_symbol_references` would not recreate.
+fn snapshot_cross_file_refs(
+    tx: &Connection,
+    changed_paths: &[String],
+) -> Result<Vec<PreservedRef>> {
+    if changed_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = changed_paths
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT sr.from_symbol_id, ft.path, st.name, st.kind, sr.kind
+         FROM symbol_refs sr
+         JOIN symbols st ON sr.to_symbol_id = st.id
+         JOIN files ft ON st.file_id = ft.id
+         JOIN symbols sf ON sr.from_symbol_id = sf.id
+         JOIN files ff ON sf.file_id = ff.id
+         WHERE ft.path IN ({placeholders})
+           AND ff.path NOT IN ({placeholders})"
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(changed_paths.len() * 2);
+    for p in changed_paths {
+        params.push(p);
+    }
+    for p in changed_paths {
+        params.push(p);
+    }
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok(PreservedRef {
+            from_symbol_id: row.get(0)?,
+            to_file_path: row.get(1)?,
+            to_name: row.get(2)?,
+            to_kind: row.get(3)?,
+            ref_kind: row.get(4)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Re-insert preserved refs by looking the `(file, name, kind)` target up
+/// in the post-reingest symbol table. A unique match relinks the ref; a
+/// missing or ambiguous match is dropped because any guess would point at
+/// the wrong symbol and bury real call-graph signal.
+fn restore_cross_file_refs(tx: &Connection, preserved: &[PreservedRef]) -> Result<()> {
+    if preserved.is_empty() {
+        return Ok(());
+    }
+    let mut lookup = tx.prepare(
+        "SELECT s.id FROM symbols s
+         JOIN files f ON s.file_id = f.id
+         WHERE f.path = ?1 AND s.name = ?2 AND s.kind = ?3
+         LIMIT 2",
+    )?;
+    let mut from_exists = tx.prepare("SELECT 1 FROM symbols WHERE id = ?1")?;
+    let mut batch: Vec<(i64, i64, String)> = Vec::new();
+    for pref in preserved {
+        let matches: Vec<i64> = lookup
+            .query_map(
+                rusqlite::params![pref.to_file_path, pref.to_name, pref.to_kind],
+                |row| row.get::<_, i64>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if matches.len() != 1 {
+            continue;
+        }
+        if !from_exists.exists(rusqlite::params![pref.from_symbol_id])? {
+            continue;
+        }
+        batch.push((pref.from_symbol_id, matches[0], pref.ref_kind.clone()));
+    }
+    drop(lookup);
+    drop(from_exists);
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let batch_slice: Vec<(i64, i64, &str)> =
+        batch.iter().map(|(f, t, k)| (*f, *t, k.as_str())).collect();
+    write::insert_symbol_refs(tx, &batch_slice)?;
+    Ok(())
+}
+
 fn delete_single_file(
     tx: &Connection,
     root: &Path,
@@ -1461,6 +1566,30 @@ pub fn incremental_index_with_prefix(
         }
     }
 
+    // --- Phase 1.5: snapshot cross-file symbol_refs that would cascade ---
+    // When a changed file is re-ingested, `clear_file_content` deletes its
+    // old symbols and SQLite CASCADEs every `symbol_refs(*, to=old_sym, *)`
+    // row. `resolve_symbol_references` below only iterates files we are
+    // about to re-parse, so refs whose `from_symbol_id` lives in an
+    // unchanged file would be lost forever without this snapshot.
+    let changed_rel_paths: Vec<String> = changed
+        .iter()
+        .filter_map(|p| {
+            let rel = p.strip_prefix(root).ok()?;
+            let rel_str = to_forward_slash(rel.to_string_lossy().into_owned());
+            if path_prefix.is_empty() {
+                Some(rel_str)
+            } else {
+                Some(format!("{path_prefix}/{rel_str}"))
+            }
+        })
+        .collect();
+    let preserved_refs = if changed_rel_paths.is_empty() {
+        Vec::new()
+    } else {
+        snapshot_cross_file_refs(&tx, &changed_rel_paths)?
+    };
+
     // --- Phase 2: re-index changed files ---
     let mut indexed: Vec<IndexedFile> = Vec::new();
     let mut updated = 0usize;
@@ -1498,6 +1627,11 @@ pub fn incremental_index_with_prefix(
     )?;
 
     resolve_symbol_references(&tx, &indexed, &imports_by_file)?;
+
+    // Restore the snapshot: look each preserved ref up by (file, name,
+    // kind) against the newly-inserted symbols. Ambiguous or missing
+    // matches are dropped rather than pointing at the wrong symbol.
+    restore_cross_file_refs(&tx, &preserved_refs)?;
 
     // --- Phase 4: update derived tables ---
     // Update FTS and body index only for the files that actually changed.
@@ -3332,6 +3466,103 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "delete path must match the prefix to actually remove the row"
+        );
+    }
+
+    /// Regression for the missing `/` in `changed_rel_paths` under a
+    /// multi-root prefix. Pre-fix, reindexing `helper.rs` under prefix
+    /// `alpha` built the key `"alphasrc/helper.rs"`, which
+    /// `snapshot_cross_file_refs` could never match, so the cross-ref from
+    /// `lib.rs::run` -> `helper.rs::do_work` was CASCADEd away by
+    /// `clear_file_content` and never recreated (because lib.rs was
+    /// unchanged, `resolve_symbol_references` never re-parsed it).
+    ///
+    /// Post-fix, the key is `"alpha/src/helper.rs"`, the snapshot preserves
+    /// the ref, and `restore_cross_file_refs` re-links it to the new
+    /// helper-symbol id.
+    #[test]
+    fn incremental_with_prefix_preserves_cross_file_refs() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("subroot");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+
+        fs::write(
+            src.join("lib.rs"),
+            "pub mod helper;\n\
+             use crate::helper::do_work;\n\
+             pub fn run() { do_work(); }\n",
+        )
+        .unwrap();
+        let helper_path = src.join("helper.rs");
+        fs::write(&helper_path, "pub fn do_work() {}\n").unwrap();
+
+        let conn = open_test_conn();
+        let prefix = "alpha".to_string();
+        full_index_root(&conn, &root, true, &prefix, &HashSet::new()).unwrap();
+
+        // Precondition: both prefixed rows exist and the cross-ref was
+        // resolved during the initial index.
+        assert!(
+            read::get_file_by_path(&conn, "alpha/src/lib.rs")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            read::get_file_by_path(&conn, "alpha/src/helper.rs")
+                .unwrap()
+                .is_some()
+        );
+
+        let initial_refs: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT sf.name, st.name FROM symbol_refs r
+                     JOIN symbols sf ON sf.id = r.from_symbol_id
+                     JOIN symbols st ON st.id = r.to_symbol_id
+                     ORDER BY sf.name, st.name",
+                )
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+        };
+        assert!(
+            initial_refs
+                .iter()
+                .any(|(f, t)| f == "run" && t == "do_work"),
+            "precondition: initial cross-ref must exist, got {initial_refs:?}"
+        );
+
+        // Modify only helper.rs. lib.rs stays untouched on disk, so
+        // resolve_symbol_references will NOT re-parse it. The only way the
+        // (run -> do_work) ref survives is via snapshot_cross_file_refs.
+        fs::write(&helper_path, "pub fn do_work() { /* edited */ }\n").unwrap();
+        incremental_index_with_prefix(&conn, &root, &prefix, &[helper_path.clone()], &[]).unwrap();
+
+        // The cross-ref MUST survive.
+        let final_refs: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT sf.name, st.name FROM symbol_refs r
+                     JOIN symbols sf ON sf.id = r.from_symbol_id
+                     JOIN symbols st ON st.id = r.to_symbol_id
+                     ORDER BY sf.name, st.name",
+                )
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+        };
+        assert!(
+            final_refs.iter().any(|(f, t)| f == "run" && t == "do_work"),
+            "post-incremental cross-ref must be preserved, got {final_refs:?}"
         );
     }
 }

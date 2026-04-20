@@ -386,7 +386,28 @@ pub(super) fn has_inline_rust_tests(project_root: &std::path::Path, path: &str) 
     let Ok(source) = std::fs::read_to_string(&abs_path) else {
         return false;
     };
-    source.contains("#[cfg(test)]") || source.contains("#[test]") || source.contains("::test]")
+    if source.contains("#[cfg(test)]") || source.contains("#[test]") {
+        return true;
+    }
+    // Accept path-qualified test attributes like `#[tokio::test]` but not
+    // incidental `::test]` occurrences inside macros or array indexing
+    // (e.g. `vec![mod::test]`). The attribute must open with `#[` and the
+    // preceding text between `#[` and `::test]` must be a bare path without
+    // intervening whitespace or brackets.
+    for (idx, _) in source.match_indices("::test]") {
+        let before = &source[..idx];
+        if let Some(attr_start) = before.rfind("#[") {
+            let between = &before[attr_start + 2..];
+            if !between.is_empty()
+                && between
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'_')
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Convert a file path or symbol name into a valid Mermaid node ID.
@@ -676,5 +697,74 @@ mod tests {
         let input = "foo\nfoox\n_foo\nfoo bar";
         let expected = "X\nfoox\n_foo\nX bar";
         assert_eq!(per_line_rename(input, "foo", "X"), expected);
+    }
+}
+
+#[cfg(test)]
+mod has_inline_rust_tests_tests {
+    use super::has_inline_rust_tests;
+    use tempfile::TempDir;
+
+    fn make_rust_file(contents: &str) -> (TempDir, &'static str) {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), contents).unwrap();
+        (tmp, "file.rs")
+    }
+
+    #[test]
+    fn detects_plain_test_attr() {
+        let (tmp, rel) = make_rust_file("#[test]\nfn t() {}\n");
+        assert!(has_inline_rust_tests(tmp.path(), rel));
+    }
+
+    #[test]
+    fn detects_cfg_test() {
+        let (tmp, rel) = make_rust_file("#[cfg(test)]\nmod tests {}\n");
+        assert!(has_inline_rust_tests(tmp.path(), rel));
+    }
+
+    #[test]
+    fn detects_tokio_test() {
+        let (tmp, rel) = make_rust_file("#[tokio::test]\nasync fn t() {}\n");
+        assert!(
+            has_inline_rust_tests(tmp.path(), rel),
+            "path-qualified test attrs must still count"
+        );
+    }
+
+    #[test]
+    fn detects_async_std_test() {
+        let (tmp, rel) = make_rust_file("#[async_std::test]\nasync fn t() {}\n");
+        assert!(has_inline_rust_tests(tmp.path(), rel));
+    }
+
+    #[test]
+    fn rejects_macro_indexing_false_positive() {
+        // The previous `contains("::test]")` heuristic flagged this as
+        // having inline tests - it is the regression being fixed.
+        let (tmp, rel) = make_rust_file("let _ = vec![mod::test];\n");
+        assert!(
+            !has_inline_rust_tests(tmp.path(), rel),
+            "vec![mod::test] must not count as an inline test"
+        );
+    }
+
+    #[test]
+    fn rejects_partial_macro_false_positive() {
+        let (tmp, rel) = make_rust_file("macro_call!(Foo::test];\n");
+        assert!(!has_inline_rust_tests(tmp.path(), rel));
+    }
+
+    #[test]
+    fn rejects_file_without_any_tests() {
+        let (tmp, rel) = make_rust_file("pub fn regular() {}\n");
+        assert!(!has_inline_rust_tests(tmp.path(), rel));
+    }
+
+    #[test]
+    fn rejects_non_rust_extension() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.py"), "#[test]").unwrap();
+        assert!(!has_inline_rust_tests(tmp.path(), "file.py"));
     }
 }

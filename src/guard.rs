@@ -234,14 +234,29 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
 /// stores in `files.path`. Returns `None` if the path is outside the project.
 pub fn relativize_file_path(project_root: &Path, file_path: &Path) -> Option<String> {
     let canonical_root = project_root.canonicalize().ok()?;
-    let canonical_file = file_path
-        .canonicalize()
-        .ok()
-        .unwrap_or_else(|| file_path.to_path_buf());
+    let canonical_file = canonicalize_possibly_missing(file_path);
     canonical_file
         .strip_prefix(&canonical_root)
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Canonicalize `path` even when the final component does not yet exist
+/// (common for `Write` edits that are creating a brand-new file). On macOS
+/// the returned path lives under `/private/tmp`, matching what
+/// `project_root.canonicalize()` yields - so the `strip_prefix` check keeps
+/// working instead of tripping on the `/tmp` vs `/private/tmp` symlink.
+fn canonicalize_possibly_missing(path: &Path) -> PathBuf {
+    if let Ok(p) = path.canonicalize() {
+        return p;
+    }
+    if let Some(parent) = path.parent()
+        && let Ok(parent_canon) = parent.canonicalize()
+        && let Some(file_name) = path.file_name()
+    {
+        return parent_canon.join(file_name);
+    }
+    path.to_path_buf()
 }
 
 /// Compute the acknowledgment file path for a given project-relative file.
@@ -530,5 +545,58 @@ mod tests {
         let p3 = ack_path(root, "src/bar.rs");
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn relativize_resolves_existing_file_under_tempdir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let abs = root.join("src/lib.rs");
+        std::fs::write(&abs, "fn f() {}").unwrap();
+
+        let rel = relativize_file_path(root, &abs).expect("inside root");
+        // macOS `/tmp` is a symlink to `/private/tmp`; the output uses
+        // forward slashes because the test path only contains ASCII.
+        assert_eq!(rel.replace('\\', "/"), "src/lib.rs");
+    }
+
+    #[test]
+    fn relativize_resolves_not_yet_existing_file() {
+        // The regression: `Write` creates a brand-new file so the path
+        // cannot be canonicalized directly. Before the fix, the fallback
+        // to `to_path_buf()` left the path as `/tmp/...` and
+        // `strip_prefix(&canonical_root)` (== `/private/tmp/...` on macOS)
+        // returned Err, so the guard silently passed every new-file Write.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let abs_new = root.join("src/new_file.rs");
+        assert!(!abs_new.exists());
+
+        let rel = relativize_file_path(root, &abs_new).expect("inside root");
+        assert_eq!(rel.replace('\\', "/"), "src/new_file.rs");
+    }
+
+    #[test]
+    fn relativize_rejects_path_outside_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // Temp dir on macOS lives under `/var/folders/...`, pointing at
+        // `/etc` exercises the "outside root" branch.
+        let outside = std::path::Path::new("/etc/passwd");
+        assert!(relativize_file_path(root, outside).is_none());
+    }
+
+    #[test]
+    fn canonicalize_possibly_missing_survives_missing_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let new_file = root.join("not_yet.rs");
+        let resolved = super::canonicalize_possibly_missing(&new_file);
+        // Parent got canonicalized (`/tmp` → `/private/tmp` on macOS)
+        // and the leaf was joined on top unchanged.
+        assert!(resolved.ends_with("not_yet.rs"));
+        assert!(resolved.parent().expect("parent").exists());
     }
 }

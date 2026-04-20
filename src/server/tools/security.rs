@@ -88,6 +88,7 @@ impl QartezServer {
                 .read()
                 .map_err(|e| e.to_string())?
                 .clone(),
+            root_aliases: self.root_aliases.read().map_err(|e| e.to_string())?.clone(),
         };
 
         let findings = scan(&conn, &rules, &opts);

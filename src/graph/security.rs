@@ -102,6 +102,12 @@ pub struct ScanOptions {
     pub min_severity: Severity,
     pub file_path_filter: Option<String>,
     pub project_roots: Vec<std::path::PathBuf>,
+    /// Map of canonical root path to the alias the user configured for it
+    /// in `workspace.toml`. Without this, aliased roots in a multi-root
+    /// project resolve to the wrong on-disk path when the first component
+    /// of the indexed relative path is the alias rather than the directory
+    /// name. Defaults to empty for callers that have no aliases.
+    pub root_aliases: HashMap<std::path::PathBuf, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +513,7 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
     let mut findings = Vec::new();
 
     for (rel_path, symbols) in &by_file {
-        let abs = resolve_path(rel_path, &opts.project_roots);
+        let abs = resolve_path(rel_path, &opts.project_roots, &opts.root_aliases);
         let file_text = match abs.and_then(|p| std::fs::read_to_string(p).ok()) {
             Some(t) => t,
             None => continue,
@@ -674,16 +680,26 @@ fn is_sec007_benign(url: &str, body: &str, match_start: usize) -> bool {
 ///
 /// Follows the same multi-root prefix resolution as
 /// `rebuild_symbol_bodies_multi`: if the first path component matches a
-/// known root directory name, join the remainder with that root.
-fn resolve_path(rel_path: &str, roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+/// known root alias or directory name, join the remainder with that root.
+fn resolve_path(
+    rel_path: &str,
+    roots: &[std::path::PathBuf],
+    aliases: &HashMap<std::path::PathBuf, String>,
+) -> Option<std::path::PathBuf> {
     if roots.len() > 1 {
         let p = std::path::Path::new(rel_path);
         if let Some(std::path::Component::Normal(first)) = p.components().next() {
             let first_str = first.to_string_lossy();
             for root in roots {
-                if let Some(name) = root.file_name()
-                    && name.to_string_lossy() == *first_str
-                {
+                let matches = match aliases.get(root) {
+                    // User-configured alias wins when present - the index stored
+                    // paths as `<alias>/sub/file.rs`, not `<dir_name>/sub/...`.
+                    Some(alias) => alias.as_str() == first_str.as_ref(),
+                    None => root
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy() == first_str),
+                };
+                if matches {
                     let remainder: std::path::PathBuf = p.components().skip(1).collect();
                     let abs = root.join(remainder);
                     if abs.exists() {
@@ -699,6 +715,59 @@ fn resolve_path(rel_path: &str, roots: &[std::path::PathBuf]) -> Option<std::pat
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resolve_path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolves_single_root_without_prefix() {
+        let roots = vec![PathBuf::from("/tmp/a")];
+        let aliases = HashMap::new();
+        let abs = resolve_path("src/lib.rs", &roots, &aliases);
+        assert_eq!(abs, Some(PathBuf::from("/tmp/a/src/lib.rs")));
+    }
+
+    #[test]
+    fn resolves_aliased_root_by_alias_name() {
+        // The regression: the DB stored the file as `MyAlpha/src/lib.rs`
+        // because the user configured an alias in workspace.toml. The old
+        // `resolve_path` only matched `root.file_name()` (= "a"), so with
+        // a non-matching first component it fell through to `roots[0]`
+        // which pointed at the wrong directory.
+        let mut tmp_a = std::env::temp_dir();
+        tmp_a.push("qartez_resolve_a");
+        let mut tmp_b = std::env::temp_dir();
+        tmp_b.push("qartez_resolve_b");
+        std::fs::create_dir_all(tmp_a.join("src")).unwrap();
+        std::fs::create_dir_all(tmp_b.join("src")).unwrap();
+        std::fs::write(tmp_b.join("src/hit.rs"), "fn hit() {}").unwrap();
+
+        let roots = vec![tmp_a.clone(), tmp_b.clone()];
+        let mut aliases = HashMap::new();
+        aliases.insert(tmp_b.clone(), "MyAlpha".to_string());
+
+        let resolved = resolve_path("MyAlpha/src/hit.rs", &roots, &aliases);
+        assert_eq!(
+            resolved,
+            Some(tmp_b.join("src/hit.rs")),
+            "aliased prefix must resolve against its mapped root"
+        );
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
+    }
+
+    #[test]
+    fn falls_back_to_first_root_when_prefix_unknown() {
+        let roots = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
+        let aliases = HashMap::new();
+        let abs = resolve_path("unknown/src/lib.rs", &roots, &aliases);
+        assert_eq!(abs, Some(PathBuf::from("/tmp/a/unknown/src/lib.rs")));
+    }
+}
 
 #[cfg(test)]
 mod tests {

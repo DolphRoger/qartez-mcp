@@ -134,25 +134,36 @@ pub fn delete_file_data(conn: &Connection, file_id: i64) -> Result<()> {
 
 /// Delete all files whose path starts with `alias/` (e.g. a workspace domain),
 /// cleaning up FTS and embedding tables before the cascade removes symbols.
+///
+/// The alias is treated as a literal prefix: `_` and `%` (SQL LIKE wildcards)
+/// and `\` (the escape char) are escaped so an alias like `my_ws` does not
+/// also match `myXws/` or `myAws/`. `ESCAPE '\'` is set on every LIKE clause.
 pub fn delete_files_by_prefix(conn: &Connection, alias: &str) -> Result<usize> {
-    let pattern = format!("{alias}/%");
+    let escaped_alias = alias
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("{escaped_alias}/%");
     conn.execute(
         "DELETE FROM symbols_fts WHERE rowid IN \
-         (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path LIKE ?1)",
+         (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path LIKE ?1 ESCAPE '\\')",
         [&pattern],
     )?;
     conn.execute(
         "DELETE FROM symbols_body_fts WHERE rowid IN \
-         (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path LIKE ?1)",
+         (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path LIKE ?1 ESCAPE '\\')",
         [&pattern],
     )?;
     #[cfg(feature = "semantic")]
     conn.execute(
         "DELETE FROM symbol_embeddings WHERE rowid IN \
-         (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path LIKE ?1)",
+         (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path LIKE ?1 ESCAPE '\\')",
         [&pattern],
     )?;
-    let n = conn.execute("DELETE FROM files WHERE path LIKE ?1", [&pattern])?;
+    let n = conn.execute(
+        "DELETE FROM files WHERE path LIKE ?1 ESCAPE '\\'",
+        [&pattern],
+    )?;
     Ok(n)
 }
 
@@ -1126,5 +1137,94 @@ mod tests {
             )
             .unwrap();
         assert_eq!(edge_count, 1, "incoming edge a→b must survive");
+    }
+
+    /// Regression: an alias that contains `_` (SQL LIKE single-char wildcard)
+    /// must not purge files from sibling workspaces whose names differ only
+    /// in that position. Pre-fix, `LIKE 'my_ws/%'` matched `myXws/foo`,
+    /// `myAws/foo`, etc. The fix escapes LIKE metachars and adds `ESCAPE '\'`.
+    #[test]
+    fn delete_files_by_prefix_treats_underscore_as_literal() {
+        let conn = setup();
+        // Inside target workspace
+        upsert_file(&conn, "my_ws/a.rs", 1000, 100, "rust", 10).unwrap();
+        upsert_file(&conn, "my_ws/nested/b.rs", 1000, 100, "rust", 10).unwrap();
+        // Sibling workspaces that would be wrongly matched by `_` wildcard
+        upsert_file(&conn, "myXws/a.rs", 1000, 100, "rust", 10).unwrap();
+        upsert_file(&conn, "myAws/b.rs", 1000, 100, "rust", 10).unwrap();
+        // Unrelated workspace
+        upsert_file(&conn, "other/c.rs", 1000, 100, "rust", 10).unwrap();
+        // Path containing the alias but not at prefix
+        upsert_file(&conn, "other/my_ws/c.rs", 1000, 100, "rust", 10).unwrap();
+
+        let removed = delete_files_by_prefix(&conn, "my_ws").unwrap();
+        assert_eq!(removed, 2, "exactly the two my_ws/* rows must be deleted");
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 4, "sibling workspaces and unrelated rows survive");
+
+        let survivors: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT path FROM files ORDER BY path")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            survivors,
+            vec![
+                "myAws/b.rs".to_string(),
+                "myXws/a.rs".to_string(),
+                "other/c.rs".to_string(),
+                "other/my_ws/c.rs".to_string(),
+            ]
+        );
+    }
+
+    /// A `%` in the alias (which `validate_alias` normally rejects, but the
+    /// storage layer is a defense-in-depth boundary) must also behave as a
+    /// literal and not match every other workspace.
+    #[test]
+    fn delete_files_by_prefix_treats_percent_as_literal() {
+        let conn = setup();
+        upsert_file(&conn, "al%ias/a.rs", 1000, 100, "rust", 10).unwrap();
+        upsert_file(&conn, "alXias/a.rs", 1000, 100, "rust", 10).unwrap();
+        upsert_file(&conn, "alXXXias/a.rs", 1000, 100, "rust", 10).unwrap();
+
+        let removed = delete_files_by_prefix(&conn, "al%ias").unwrap();
+        assert_eq!(removed, 1);
+
+        let surviving_paths: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path LIKE 'alXias/%' OR path LIKE 'alXXXias/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(surviving_paths, 2);
+    }
+
+    /// A backslash in the alias must be preserved as a literal: otherwise the
+    /// ESCAPE '\' clause would treat `alias\X` as "escape the next char" and
+    /// turn the prefix into something unpredictable.
+    #[test]
+    fn delete_files_by_prefix_handles_backslash_in_alias() {
+        let conn = setup();
+        upsert_file(&conn, "a\\b/x.rs", 1000, 100, "rust", 10).unwrap();
+        upsert_file(&conn, "aYb/x.rs", 1000, 100, "rust", 10).unwrap();
+
+        let removed = delete_files_by_prefix(&conn, "a\\b").unwrap();
+        assert_eq!(removed, 1);
+
+        let survivor: String = conn
+            .query_row("SELECT path FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(survivor, "aYb/x.rs");
     }
 }

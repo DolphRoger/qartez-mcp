@@ -3706,3 +3706,211 @@ fn test_call_tool_by_name_calls_mermaid() {
         "should contain target symbol, got: {result}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Audit follow-up: incremental index must preserve cross-file symbol_refs
+// ---------------------------------------------------------------------------
+//
+// Reproduces the regression fixed by `snapshot_cross_file_refs` /
+// `restore_cross_file_refs` in `index::mod.rs`. Before the fix, when file
+// B was re-ingested via the watcher path, SQLite CASCADEd every
+// symbol_refs row pointing at B's old symbols (including those whose
+// `from_symbol_id` lived in unchanged file A). Because the subsequent
+// `resolve_symbol_references` pass only iterated re-parsed files, A's
+// call-graph edges to B were silently dropped.
+#[test]
+fn test_incremental_preserves_cross_file_symbol_refs() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    // File B exports `helper`.
+    fs::write(root.join("helper.rs"), "pub fn helper() { let _ = 1; }\n").unwrap();
+
+    // File A imports and calls `helper`.
+    fs::write(
+        root.join("caller.rs"),
+        "use crate::helper::helper;\n\npub fn caller() {\n    helper();\n}\n",
+    )
+    .unwrap();
+
+    // Minimal Cargo-like skeleton so the Rust import resolver finds both.
+    fs::write(root.join("lib.rs"), "pub mod helper;\npub mod caller;\n").unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, root, false).unwrap();
+
+    let refs_before = read::get_all_symbol_refs(&conn).unwrap();
+    let ref_count_before = refs_before.len();
+    assert!(
+        ref_count_before > 0,
+        "full index must have resolved at least one cross-file ref, got 0"
+    );
+
+    // Trigger the watcher path on `helper.rs` - this is the scenario the
+    // audit flagged. The body changes but the `helper` symbol name/kind
+    // stays the same, so restoration should succeed.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(root.join("helper.rs"), "pub fn helper() { let _ = 2; }\n").unwrap();
+
+    index::incremental_index(&conn, root, &[root.join("helper.rs")], &[]).unwrap();
+
+    let refs_after = read::get_all_symbol_refs(&conn).unwrap();
+    assert!(
+        refs_after.len() >= ref_count_before,
+        "incremental re-index must not lose cross-file refs: before={} after={}",
+        ref_count_before,
+        refs_after.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit follow-up: a rename between re-ingests drops the (now stale) ref
+// ---------------------------------------------------------------------------
+//
+// Guards the conservative half of the snapshot/restore logic: when the
+// target symbol genuinely disappears (renamed / removed), the preserved
+// ref must NOT be relinked to a randomly-chosen neighbor. Ambiguous
+// matches are dropped, not guessed.
+#[test]
+fn test_incremental_drops_ref_when_target_symbol_renamed() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(root.join("helper.rs"), "pub fn helper() { let _ = 1; }\n").unwrap();
+    fs::write(
+        root.join("caller.rs"),
+        "use crate::helper::helper;\npub fn caller() { helper(); }\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib.rs"), "pub mod helper;\npub mod caller;\n").unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, root, false).unwrap();
+    let before = read::get_all_symbol_refs(&conn).unwrap().len();
+    assert!(before > 0);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // Rename `helper` → `renamed_helper` so the preserved ref has no
+    // candidate with the same (name, kind) after re-ingest.
+    fs::write(
+        root.join("helper.rs"),
+        "pub fn renamed_helper() { let _ = 2; }\n",
+    )
+    .unwrap();
+
+    index::incremental_index(&conn, root, &[root.join("helper.rs")], &[]).unwrap();
+
+    // Ref to `helper` from `caller` is gone. We do not assert strict
+    // equality with `before - 1` because the resolver may also emit
+    // brand-new refs (e.g. the `caller.rs` import edge resolution re-runs
+    // on the unchanged caller when its import target gets remapped). The
+    // invariant is: no ref targets the old `helper` symbol id that has
+    // just been wiped.
+    let orphan_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbol_refs sr
+             LEFT JOIN symbols s ON sr.to_symbol_id = s.id
+             WHERE s.id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_count, 0,
+        "no symbol_refs may dangle after incremental re-index"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit follow-up: qartez_move preserves source file trailing newline (#6)
+// ---------------------------------------------------------------------------
+#[test]
+fn test_qartez_move_preserves_trailing_newline_in_source() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    // Two functions; we move `b` out. The source file ends with `\n`
+    // - the POSIX convention that git-diff depends on.
+    let original = "pub fn a() { let _ = 1; }\n\npub fn b() { let _ = 2; }\n";
+    fs::write(src.join("lib.rs"), original).unwrap();
+    fs::write(src.join("other.rs"), "pub fn x() {}\n").unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, root, false).unwrap();
+    let server = QartezServer::new(conn, root.to_path_buf(), 300);
+
+    let _ = server
+        .call_tool_by_name(
+            "qartez_move",
+            json!({
+                "symbol": "b",
+                "to_file": "src/other.rs",
+                "apply": true,
+            }),
+        )
+        .expect("qartez_move must succeed");
+
+    let new_source = fs::read_to_string(src.join("lib.rs")).unwrap();
+    assert!(
+        new_source.ends_with('\n'),
+        "source file must keep POSIX trailing newline after move, got: {new_source:?}"
+    );
+    assert!(
+        !new_source.contains("pub fn b"),
+        "`b` must have been removed, got: {new_source:?}"
+    );
+    assert!(
+        new_source.contains("pub fn a"),
+        "`a` must still be present, got: {new_source:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit follow-up: qartez_move includes glob importers (#7)
+// ---------------------------------------------------------------------------
+#[test]
+fn test_qartez_move_rewrites_glob_importer() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(src.join("helper.rs"), "pub fn helper() {}\n").unwrap();
+    // Glob import - the old `spec.contains(symbol)` filter dropped this
+    // importer because the specifier "helper::*" does not contain the
+    // symbol name `helper` as a word boundary match in the intended way.
+    fs::write(
+        src.join("caller.rs"),
+        "use crate::helper::*;\npub fn caller() {}\n",
+    )
+    .unwrap();
+    fs::write(src.join("lib.rs"), "pub mod helper;\npub mod caller;\n").unwrap();
+    // Pre-create the target so the move writes a valid destination.
+    fs::write(src.join("moved.rs"), "pub fn anchor() {}\n").unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, root, false).unwrap();
+    let server = QartezServer::new(conn, root.to_path_buf(), 300);
+
+    // Preview path: the glob importer must be listed.
+    let preview = server
+        .call_tool_by_name(
+            "qartez_move",
+            json!({
+                "symbol": "helper",
+                "to_file": "src/moved.rs",
+            }),
+        )
+        .expect("preview must succeed");
+    assert!(
+        preview.contains("caller.rs"),
+        "glob importer caller.rs must appear in preview, got: {preview}"
+    );
+}

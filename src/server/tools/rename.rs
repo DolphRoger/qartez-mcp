@@ -114,7 +114,11 @@ impl QartezServer {
                         continue;
                     }
                     let source_arc = self.cached_source(rel_path).ok_or_else(|| {
-                        format!("Cannot read {}", self.project_root.join(rel_path).display())
+                        let display = self
+                            .safe_resolve(rel_path)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| rel_path.to_string());
+                        format!("Cannot read {display}")
                     })?;
                     let content: &str = source_arc.as_str();
                     let lines: Vec<&str> = content.lines().collect();
@@ -144,7 +148,11 @@ impl QartezServer {
                     // Language not supported by tree-sitter - use a
                     // word-boundary text scan as the only available signal.
                     let source_arc = self.cached_source(rel_path).ok_or_else(|| {
-                        format!("Cannot read {}", self.project_root.join(rel_path).display())
+                        let display = self
+                            .safe_resolve(rel_path)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| rel_path.to_string());
+                        format!("Cannot read {display}")
                     })?;
                     let content: &str = source_arc.as_str();
                     let mut file_had_hit = false;
@@ -183,7 +191,7 @@ impl QartezServer {
             // `files_to_scan` but was skipped during the AST walk above;
             // those files must stay untouched.
             for rel_path in &files_touched {
-                let abs_path = self.project_root.join(rel_path);
+                let abs_path = self.safe_resolve(rel_path)?;
                 let content = std::fs::read_to_string(&abs_path)
                     .map_err(|e| format!("Cannot read {}: {e}", abs_path.display()))?;
 

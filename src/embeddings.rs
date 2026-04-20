@@ -187,7 +187,7 @@ impl EmbeddingModel {
         let (out_shape, data) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| anyhow::anyhow!("tensor extraction: {e}"))?;
-        let hidden_dim = *out_shape.last().unwrap_or(&0) as usize;
+        let hidden_dim = hidden_dim_from_shape(out_shape)?;
         // `data` is a flat slice of length batch_size * max_len * hidden_dim.
         // Index as `data[i * max_len * hidden_dim + j * hidden_dim + k]`.
         let stride_batch = max_len * hidden_dim;
@@ -220,6 +220,22 @@ impl EmbeddingModel {
 
         Ok(results)
     }
+}
+
+/// Extract the hidden dimension from an ONNX output tensor shape. The model
+/// is expected to return `[batch, seq_len, hidden_dim]`; the hidden dim is
+/// the last axis. Returns an error if the shape is empty or if the last axis
+/// is zero, both of which would otherwise silently produce zero-length
+/// embeddings and poison downstream similarity scores.
+fn hidden_dim_from_shape(out_shape: &[i64]) -> Result<usize> {
+    out_shape
+        .last()
+        .copied()
+        .filter(|d| *d > 0)
+        .map(|d| d as usize)
+        .ok_or_else(|| {
+            anyhow::anyhow!("ONNX model returned empty/zero output shape; cannot derive hidden_dim")
+        })
 }
 
 /// L2-normalize a vector in place. Returns a zero vector for zero-norm inputs.
@@ -359,6 +375,38 @@ mod tests {
         let b = vec![0.0, 1.0];
         let sim = cosine_similarity(&a, &b);
         assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn hidden_dim_from_valid_shape() {
+        assert_eq!(hidden_dim_from_shape(&[1, 10, 768]).unwrap(), 768);
+        assert_eq!(hidden_dim_from_shape(&[4, 2, 1024]).unwrap(), 1024);
+        assert_eq!(hidden_dim_from_shape(&[42]).unwrap(), 42);
+    }
+
+    #[test]
+    fn hidden_dim_from_empty_shape_errors() {
+        let err = hidden_dim_from_shape(&[]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("empty/zero output shape"),
+            "message must name the failure mode, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn hidden_dim_from_zero_last_axis_errors() {
+        let err = hidden_dim_from_shape(&[1, 10, 0]).unwrap_err();
+        assert!(format!("{err}").contains("empty/zero output shape"));
+    }
+
+    #[test]
+    fn hidden_dim_rejects_negative_last_axis() {
+        // i64 can be negative via sign-extension of untrusted model outputs.
+        // Pre-fix, casting -1i64 to usize would wrap to usize::MAX and panic
+        // on the next allocation. The > 0 filter catches it cleanly.
+        let err = hidden_dim_from_shape(&[1, 10, -1]).unwrap_err();
+        assert!(format!("{err}").contains("empty/zero output shape"));
     }
 
     #[test]

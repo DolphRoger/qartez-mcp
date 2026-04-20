@@ -309,10 +309,15 @@ pub fn build_non_mcp_cache(
     prior: &BenchmarkReport,
     expected_sha: Option<&str>,
 ) -> HashMap<String, SideReport> {
-    if let (Some(want), Some(have)) = (expected_sha, prior.git_sha.as_deref())
-        && want != have
-    {
-        return HashMap::new();
+    // Invalidate whenever the caller pins a SHA and it does not match the
+    // stored one. A prior report without a recorded SHA (older schema) is
+    // treated as a miss when the caller wants SHA pinning - otherwise the
+    // non-MCP numbers can be silently reused across unrelated revisions.
+    if let Some(want) = expected_sha {
+        match prior.git_sha.as_deref() {
+            Some(have) if have == want => {}
+            _ => return HashMap::new(),
+        }
     }
     prior
         .scenarios
@@ -434,5 +439,89 @@ mod tests {
     fn git_sha_missing_root_returns_none_without_panic() {
         let missing = Path::new("/nonexistent/qartez/benchmark/root/does/not/exist");
         assert!(git_sha(missing).is_none());
+    }
+
+    /// Build a minimal `BenchmarkReport` with one scenario via serde so the
+    /// `build_non_mcp_cache` tests below do not have to hard-code 30+
+    /// struct fields. Keeps the tests resilient to schema extensions.
+    fn synthetic_report(git_sha: Option<&str>) -> BenchmarkReport {
+        let sha_json = match git_sha {
+            Some(s) => format!("\"{s}\""),
+            None => "null".to_string(),
+        };
+        let side = r#"{
+            "response_bytes": 0,
+            "response_preview": "",
+            "tokens": 0,
+            "naive_tokens": 0,
+            "latency": {"mean_us": 0.0, "stdev_us": 0.0, "p50_us": 0.0, "p95_us": 0.0, "samples": 0},
+            "error": null
+        }"#;
+        let scenario = format!(
+            r#"{{
+                "tool": "qartez_find",
+                "scenario_id": "scenario-1",
+                "description": "",
+                "mcp": {side},
+                "non_mcp": {side},
+                "savings": {{"tokens_pct": 0.0, "bytes_pct": 0.0, "latency_ratio": 1.0}},
+                "verdict": {{"winner": "mcp", "pros": [], "cons": [], "summary": ""}}
+            }}"#
+        );
+        let json = format!(
+            r#"{{
+                "generated_at_unix": 0,
+                "git_sha": {sha_json},
+                "tokenizer": "naive",
+                "language": "rust",
+                "scenarios": [{scenario}]
+            }}"#
+        );
+        serde_json::from_str(&json).expect("synthetic report must parse")
+    }
+
+    #[test]
+    fn build_non_mcp_cache_matches_when_sha_equal() {
+        let prior = synthetic_report(Some("abc123"));
+        let cache = build_non_mcp_cache(&prior, Some("abc123"));
+        assert_eq!(cache.len(), 1, "SHA match must populate cache");
+    }
+
+    #[test]
+    fn build_non_mcp_cache_empty_when_sha_differs() {
+        let prior = synthetic_report(Some("abc123"));
+        let cache = build_non_mcp_cache(&prior, Some("def456"));
+        assert!(cache.is_empty(), "SHA mismatch must drop cache");
+    }
+
+    #[test]
+    fn build_non_mcp_cache_empty_when_prior_sha_missing_but_expected_some() {
+        // The exact regression: the old `(Some, Some)` pattern silently
+        // accepted a stale `None`-SHA report, so downstream benchmarks
+        // compared current MCP numbers against unrelated non-MCP numbers.
+        let prior = synthetic_report(None);
+        let cache = build_non_mcp_cache(&prior, Some("abc123"));
+        assert!(
+            cache.is_empty(),
+            "prior report with no SHA must be rejected when caller pins one"
+        );
+    }
+
+    #[test]
+    fn build_non_mcp_cache_accepts_prior_when_caller_is_agnostic() {
+        let prior = synthetic_report(Some("abc123"));
+        let cache = build_non_mcp_cache(&prior, None);
+        assert_eq!(
+            cache.len(),
+            1,
+            "None expected_sha must accept any prior report"
+        );
+    }
+
+    #[test]
+    fn build_non_mcp_cache_accepts_when_both_none() {
+        let prior = synthetic_report(None);
+        let cache = build_non_mcp_cache(&prior, None);
+        assert_eq!(cache.len(), 1);
     }
 }

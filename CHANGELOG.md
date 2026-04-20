@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.1] - 2026-04-20
+
+### Fixed
+
+- **Workspace-alias path resolution across indexed-file tools** - `qartez_read`, `qartez_move`, `qartez_rename_file`, and the parse cache (`cached_source`, `file_mtime_ns`) now resolve file paths through `safe_resolve` instead of `project_root.join`. Any DB path prefixed with a workspace alias (e.g. `WS/src/widget.rs`) previously resolved against the primary root and returned "No such file or directory". The `qartez_rename` error messages in the two `cached_source` fallbacks now also surface the `safe_resolve`-derived path so failures point at the actual location.
+- **Watcher and walker coverage of dotted config** - `.github/`, `.gitlab-ci.yml`, `.claude/`, and similar dotted config files are now indexed. Switched the walker off `.hidden(true)` and filter out `.git/` and `.qartez/` via `.filter_entry` instead. The watcher mirrors the three-tier match so `Makefile`, `Dockerfile`, and friends trigger a reindex, hot-reloads `.qartezignore` on mtime change, and translates rename events into a remove+create pair.
+- **Incremental index preserves cross-file refs** - snapshot and restore cross-file `symbol_refs` so they are not cascaded out when a changed file's old symbols get wiped. Added the missing `/` in the multi-root incremental path-prefix join so the path key matches the full-index formatter.
+- **Rename tools stop over-replacing stems and cover all importers** - `qartez_rename_file` and `qartez_move` no longer over-replace bare file stems and now rewrite `use crate::foo::bar;` imports by pairing the full and divergent-suffix stems. `qartez_move` includes every edge-graph importer (glob / parent-module imports were silently skipped) and preserves the trailing newline.
+- **`.qartez/workspace.toml` bulk-purge escapes LIKE metacharacters** - `%`, `_`, and `\` in a workspace alias are now escaped before the `LIKE` and an `ESCAPE '\'` clause is added. Prevents an alias like `my_ws` from also purging `myXws/` and friends.
+- **Multi-root dedup robust to non-existent paths** - `canonicalize().unwrap_or` silent fallback replaced with a `normalize_for_dedup` helper that falls back to `std::path::absolute` and collapses `.`/`..` components, so two logically-equal roots share a dedup key even when neither exists on disk.
+- **`opencode-plugin.ts` shell-injection hardening** - swapped `execSync` for `execFileSync` when calling `sqlite3`. Removes shell interpretation of the db path and of the caller-controlled file path, closing a `$(whoami)`-style injection surface.
+- **`release.sh` stops embedding `GITHUB_TOKEN` in the clone URL** - uses a `GIT_ASKPASS` helper so the token is not persisted in `.git/config`, process args, or git stderr.
+- **`graph/security` scan resolves aliased roots** - reads aliased roots via `root_aliases` so multi-root workspaces with overrides are actually scanned.
+- **ONNX embedding error instead of silent zero-length vector** - `embeddings.rs` now returns an error on an empty output shape rather than silently producing zero-length embeddings that broke downstream similarity. Extracted `hidden_dim_from_shape` into a pure helper with tests for empty shape, zero last axis, negative last axis, and valid shapes.
+- **`git/cochange` skips merge commits** - matches `git log --no-merges`; previously the merge-commit diff vs `parent(0)` overcounted branch-merge changes.
+- **`benchmark` cache invalidates on SHA pin upgrade** - invalidates when the caller pins a SHA and the stored report has no SHA (older schema); previously the cache was silently reused.
+- **`guard.relativize_file_path` handles missing-leaf paths** - canonicalizes the parent for files that do not exist yet so macOS `/tmp` vs `/private/tmp` no longer breaks the prefix check.
+- **`has_inline_rust_tests` rejects macro false positives** - requires the `::test]` match to be inside a `#[...::test]` attribute so `vec![mod::test]` and similar stop being flagged as having inline tests.
+
+### Contributors
+
+- **Rudolf Troger** ([@DolphRoger](https://github.com/DolphRoger)) - fixed workspace-alias path resolution across `qartez_read`, `qartez_move`, `qartez_rename_file`, and the parse cache, including a regression test that reads a symbol from a workspace-aliased file end-to-end (#23).
+
 ## [0.8.0] - 2026-04-19
 
 ### Added

@@ -85,6 +85,15 @@ pub fn analyze_cochanges(conn: &Connection, root: &Path, config: &CoChangeConfig
             }
         };
 
+        // Skip merge commits. Diffing only against parent(0) would overcount
+        // files that actually landed via the merged branch, and diffing against
+        // all parents inflates co-change for unrelated files that happened to
+        // change on separate branches. `git log --no-merges` follows the same
+        // convention for this reason.
+        if commit.parent_count() > 1 {
+            continue;
+        }
+
         let files = changed_files_in_commit(&repo, &commit);
 
         // Per-file change count: every commit counts, regardless of size.
@@ -394,6 +403,142 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "historical-only paths must not be resurrected as phantom rows"
+        );
+    }
+
+    /// Differential test for the merge-commit skip. Scenario:
+    ///
+    /// - M0: a.rs + b.rs created (pair counted once)
+    /// - M1 on main: edits a.rs + b.rs to content "main" (pair counted once)
+    /// - F on branch from M0: edits a.rs + b.rs to content "feature" (pair counted once)
+    /// - Merge commit M2: parent(0) = M1, parent(1) = F. Merge tree picks F's
+    ///   versions (as if resolving conflicts by taking "theirs"), so the
+    ///   merge tree differs from parent(0) = M1 on BOTH files.
+    ///
+    /// Pre-fix (diff-vs-parent-0 only): the merge commit contributes the (a,b)
+    /// pair again for a total of 4. Post-fix (merge skipped): total stays at 3.
+    #[test]
+    fn merge_commits_are_not_counted_in_cochange() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let repo = init_repo(dir);
+        let conn = setup_db();
+
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+
+        // Helper that writes literal content, stages, and commits with given parents.
+        let commit_with_content =
+            |files: &[(&str, &str)], msg: &str, parents: Vec<&git2::Commit>| {
+                let mut index = repo.index().unwrap();
+                for (name, content) in files {
+                    let file_path = dir.join(name);
+                    if let Some(parent) = file_path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    std::fs::write(&file_path, content).unwrap();
+                    index.add_path(Path::new(name)).unwrap();
+                }
+                index.write().unwrap();
+                let tree_oid = index.write_tree().unwrap();
+                let tree = repo.find_tree(tree_oid).unwrap();
+                repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parents)
+                    .unwrap()
+            };
+
+        // M0: create a.rs + b.rs with initial content.
+        let m0_oid = commit_with_content(&[("a.rs", "a_v0"), ("b.rs", "b_v0")], "M0", vec![]);
+        let m0 = repo.find_commit(m0_oid).unwrap();
+
+        // M1: on main, edit both files to "main".
+        let m1_oid =
+            commit_with_content(&[("a.rs", "a_main"), ("b.rs", "b_main")], "M1", vec![&m0]);
+        let m1 = repo.find_commit(m1_oid).unwrap();
+
+        // Branch from M0 and create commit F: edit both files to "feature".
+        repo.set_head_detached(m0_oid).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+        let f_oid = commit_with_content(
+            &[("a.rs", "a_feature"), ("b.rs", "b_feature")],
+            "F",
+            vec![&m0],
+        );
+        let f = repo.find_commit(f_oid).unwrap();
+
+        // Build merge commit M2: parents = [M1, F]. Merge tree takes F's
+        // versions wholesale. This is the "ours=F during merge of F into M1"
+        // conflict-resolution case. Tree differs from parent(0) = M1 on BOTH
+        // a.rs and b.rs, so the merge commit passes the min_files=2 filter.
+        //
+        // libgit2 requires HEAD to point at parent(0) when committing with
+        // update_ref="HEAD", so pass None and advance HEAD manually.
+        let merge_tree = f.tree().unwrap();
+        let m2_oid = repo
+            .commit(
+                None,
+                &sig,
+                &sig,
+                "merge F into main",
+                &merge_tree,
+                &[&m1, &f],
+            )
+            .unwrap();
+        repo.set_head_detached(m2_oid).unwrap();
+        assert_eq!(
+            repo.find_commit(m2_oid).unwrap().parent_count(),
+            2,
+            "sanity: M2 must be a merge commit"
+        );
+
+        // Sanity: confirm that M2 diffs against parent(0)=M1 on both files.
+        // If not, this test wouldn't differentiate the fix.
+        {
+            let m1_tree = m1.tree().unwrap();
+            let diff = repo
+                .diff_tree_to_tree(Some(&m1_tree), Some(&merge_tree), None)
+                .unwrap();
+            let changed: Vec<_> = diff
+                .deltas()
+                .filter_map(|d| {
+                    d.new_file()
+                        .path()
+                        .and_then(|p| p.to_str())
+                        .map(String::from)
+                })
+                .collect();
+            assert_eq!(
+                changed.len(),
+                2,
+                "sanity: merge must diff on 2 files vs parent(0), got {changed:?}"
+            );
+        }
+
+        register_files(&conn, &["a.rs", "b.rs"]);
+        analyze_cochanges(&conn, dir, &CoChangeConfig::default()).unwrap();
+
+        let pair_count: i64 = conn
+            .query_row(
+                "SELECT count FROM co_changes WHERE file_a = ?1 AND file_b = ?2",
+                rusqlite::params![
+                    storage::read::get_file_by_path(&conn, "a.rs")
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    storage::read::get_file_by_path(&conn, "b.rs")
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                ],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Three non-merge commits (M0, M1, F) each touched both files, so the
+        // (a, b) pair should be counted exactly 3 times. Pre-fix, the merge
+        // commit M2 would add a 4th (incorrect) count.
+        assert_eq!(
+            pair_count, 3,
+            "merge commit must NOT inflate the (a, b) co-change pair; \
+             expected 3 non-merge contributions, got {pair_count}"
         );
     }
 }

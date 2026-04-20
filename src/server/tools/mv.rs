@@ -84,7 +84,7 @@ impl QartezServer {
         }
 
         let (sym, source_file) = &results[0];
-        let source_abs = self.project_root.join(&source_file.path);
+        let source_abs = self.safe_resolve(&source_file.path)?;
         let target_abs = self.safe_resolve(&params.to_file)?;
 
         if source_file.path != params.to_file
@@ -128,14 +128,16 @@ impl QartezServer {
         let importers =
             read::get_edges_to(&conn, source_file.id).map_err(|e| format!("DB error: {e}"))?;
 
+        // Include every edge-graph importer unconditionally. The specifier
+        // filter used to drop rows whose text did not contain the symbol
+        // name, but that silently missed glob imports (`use foo::*;`) and
+        // parent-module imports (`use foo;` followed by `foo::sym(...)`).
+        // The downstream regex rewrite already only touches lines that
+        // mention the moved module path, so including unrelated importers
+        // is a no-op, whereas excluding them corrupts the build.
         let mut importer_files: Vec<(String, Option<String>)> = Vec::new();
         for edge in &importers {
-            let spec_matches = edge
-                .specifier
-                .as_ref()
-                .map(|s| s.contains(&params.symbol))
-                .unwrap_or(true);
-            if spec_matches && let Ok(Some(f)) = read::get_file_by_id(&conn, edge.from_file) {
+            if let Ok(Some(f)) = read::get_file_by_id(&conn, edge.from_file) {
                 importer_files.push((f.path.clone(), edge.specifier.clone()));
             }
         }
@@ -191,6 +193,10 @@ impl QartezServer {
             .filter(|(i, _)| *i < start_idx || *i >= end_idx)
             .map(|(_, l)| *l)
             .collect();
+        // `str::lines` strips the trailing newline, so `join("\n")` loses the
+        // final `\n`. Preserve the POSIX trailing newline when the source had
+        // one to avoid phantom diff lines in git.
+        let preserve_trailing_newline = source_content.ends_with('\n');
         let new_source = remaining_lines.join("\n");
         if new_source.trim().is_empty() && remaining_lines.len() <= 1 {
             std::fs::write(&source_abs, "")
@@ -199,6 +205,9 @@ impl QartezServer {
             let mut cleaned = new_source.clone();
             while cleaned.contains("\n\n\n") {
                 cleaned = cleaned.replace("\n\n\n", "\n\n");
+            }
+            if preserve_trailing_newline && !cleaned.ends_with('\n') {
+                cleaned.push('\n');
             }
             std::fs::write(&source_abs, &cleaned)
                 .map_err(|e| format!("Cannot write {}: {e}", source_abs.display()))?;
@@ -225,24 +234,26 @@ impl QartezServer {
 
         let mut import_updates = 0;
         let mut failed_writes: Vec<String> = Vec::new();
+        let old_import_path = path_to_import_stem(&source_file.path);
+        let new_import_path = path_to_import_stem(target_stem);
+        // Match both the full index-style stem (`src::foo::bar`) and the
+        // divergent suffix (`foo::bar`) so `use crate::foo::bar;` importers
+        // get rewritten alongside `use src::foo::bar;`. Without pair-based
+        // matching only the literal on-disk path would resolve, and the
+        // common `crate::…` / `super::…` imports were silently left broken.
+        let stem_pairs = rename_stem_pairs(&old_import_path, &new_import_path);
         for (importer_path, _) in &importer_files {
-            let importer_abs = self.project_root.join(importer_path);
+            let importer_abs = match self.safe_resolve(importer_path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             let content = match std::fs::read_to_string(&importer_abs) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
 
-            let old_import_path = path_to_import_stem(&source_file.path);
-            let new_import_path = path_to_import_stem(target_stem);
-
-            if old_import_path != new_import_path {
-                let updated =
-                    match regex::Regex::new(&format!(r"\b{}\b", regex::escape(&old_import_path))) {
-                        Ok(re) => re
-                            .replace_all(&content, new_import_path.as_str())
-                            .to_string(),
-                        Err(_) => content.clone(),
-                    };
+            if !stem_pairs.is_empty() {
+                let updated = apply_rename_pairs(&content, &stem_pairs)?;
                 if updated != content {
                     if let Err(e) = std::fs::write(&importer_abs, &updated) {
                         failed_writes.push(format!("{}: {e}", importer_abs.display()));

@@ -100,27 +100,23 @@ impl QartezServer {
 
         let mut updated_count = 0;
         let mut failed_writes: Vec<String> = Vec::new();
-        let stem_re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&old_stem)))
-            .map_err(|e| format!("regex error: {e}"))?;
-        let rel_stem_re = if old_rel_stem != old_stem {
-            Some(
-                regex::Regex::new(&format!(r"\b{}\b", regex::escape(&old_rel_stem)))
-                    .map_err(|e| format!("regex error: {e}"))?,
-            )
-        } else {
-            None
-        };
+        // Replace the longest matching stem first so `src::foo::bar →
+        // src::baz::qux` swaps whole-path imports before the fallback
+        // `foo::bar → baz::qux` sweep catches `use crate::foo::bar`. The
+        // previous approach did a bare `foo` → `qux` pass that accidentally
+        // renamed any identifier sharing the file stem.
+        let stem_pairs = rename_stem_pairs(&old_stem, &new_stem);
         for importer_path in &importer_paths {
-            let importer_abs = self.project_root.join(importer_path);
+            let importer_abs = match self.safe_resolve(importer_path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             let content = match std::fs::read_to_string(&importer_abs) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
 
-            let mut updated = stem_re.replace_all(&content, new_stem.as_str()).to_string();
-            if let Some(ref re) = rel_stem_re {
-                updated = re.replace_all(&updated, new_rel_stem.as_str()).to_string();
-            }
+            let updated = apply_rename_pairs(&content, &stem_pairs)?;
 
             if updated != content {
                 if let Err(e) = std::fs::write(&importer_abs, &updated) {
@@ -139,8 +135,8 @@ impl QartezServer {
         let mut mod_rewrite_note = String::new();
         if old_rel_stem != new_rel_stem
             && let Some(parent_rel) = find_parent_mod_file(&self.project_root, &params.from)
+            && let Ok(parent_abs) = self.safe_resolve(&parent_rel.to_string_lossy())
         {
-            let parent_abs = self.project_root.join(&parent_rel);
             if let Ok(content) = std::fs::read_to_string(&parent_abs) {
                 let rewritten = rewrite_mod_decl(&content, &old_rel_stem, &new_rel_stem);
                 if rewritten != content {

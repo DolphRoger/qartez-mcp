@@ -190,6 +190,60 @@ pub(super) fn relative_import_stem(file_path: &str) -> String {
     stem.to_string()
 }
 
+/// Build rename pairs that cover both the full index-style stem
+/// (`src::foo::bar`) and the prefix-stripped stem (`foo::bar`). The second
+/// form is what shows up in `use crate::...` and `use super::...` imports,
+/// so without it rename_file/move silently leave those importers pointing
+/// at the old path. Pairs are returned longest first so the caller applies
+/// them in order without the short form clobbering a partial match of the
+/// long form.
+///
+/// Returns an empty vector when old and new stems are identical.
+pub(super) fn rename_stem_pairs(old_full: &str, new_full: &str) -> Vec<(String, String)> {
+    if old_full == new_full {
+        return Vec::new();
+    }
+    let mut pairs = vec![(old_full.to_string(), new_full.to_string())];
+
+    let old_segs: Vec<&str> = old_full.split("::").collect();
+    let new_segs: Vec<&str> = new_full.split("::").collect();
+    let prefix_len = old_segs
+        .iter()
+        .zip(new_segs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Emit the divergent-suffix pair only when stripping the common prefix
+    // leaves at least one `::` on both sides. Single-segment suffixes
+    // (`bar` → `qux`) are rejected on purpose - they would word-boundary
+    // match unrelated identifiers that happen to share the stem.
+    if prefix_len > 0 && prefix_len < old_segs.len() && prefix_len < new_segs.len() {
+        let old_suffix = old_segs[prefix_len..].join("::");
+        let new_suffix = new_segs[prefix_len..].join("::");
+        if old_suffix.contains("::") && new_suffix.contains("::") && old_suffix != new_suffix {
+            pairs.push((old_suffix, new_suffix));
+        }
+    }
+
+    pairs
+}
+
+/// Apply the rename pairs produced by [`rename_stem_pairs`] to `content`,
+/// longest pair first so the full-path match does not leak into the
+/// shorter-path replacement.
+pub(super) fn apply_rename_pairs(
+    content: &str,
+    pairs: &[(String, String)],
+) -> std::result::Result<String, String> {
+    let mut out = content.to_string();
+    for (old, new) in pairs {
+        let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(old)))
+            .map_err(|e| format!("regex error: {e}"))?;
+        out = re.replace_all(&out, new.as_str()).to_string();
+    }
+    Ok(out)
+}
+
 /// Resolve the parent module file that declares `mod <name>;` for a given
 /// Rust source file. Covers both the `foo/mod.rs` and flat `foo.rs` module
 /// layouts, falling back to the crate root (`lib.rs` / `main.rs`) when the
@@ -256,5 +310,74 @@ pub(super) fn rewrite_mod_decl(content: &str, old: &str, new: &str) -> String {
             .replace_all(content, format!("${{prefix}}{new}${{suffix}}"))
             .to_string(),
         Err(_) => content.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod rename_pairs_tests {
+    use super::*;
+
+    #[test]
+    fn generates_full_and_divergent_pairs() {
+        let pairs = rename_stem_pairs("src::foo::bar", "src::baz::qux");
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("src::foo::bar".into(), "src::baz::qux".into()));
+        assert_eq!(pairs[1], ("foo::bar".into(), "baz::qux".into()));
+    }
+
+    #[test]
+    fn skips_bare_single_segment_suffix() {
+        // Only the full stem - suffix `bar` → `qux` would over-match bare
+        // identifiers and is intentionally dropped.
+        let pairs = rename_stem_pairs("src::foo::bar", "src::foo::qux");
+        assert_eq!(
+            pairs,
+            vec![("src::foo::bar".into(), "src::foo::qux".into())]
+        );
+    }
+
+    #[test]
+    fn empty_when_stems_equal() {
+        assert!(rename_stem_pairs("src::foo", "src::foo").is_empty());
+    }
+
+    #[test]
+    fn no_common_prefix_keeps_full_only() {
+        let pairs = rename_stem_pairs("src::foo::bar", "other::qux");
+        assert_eq!(pairs, vec![("src::foo::bar".into(), "other::qux".into())]);
+    }
+
+    #[test]
+    fn applies_longest_pair_first() {
+        let pairs = rename_stem_pairs("src::foo::bar", "src::baz::qux");
+        // Input where the long pair would leak if ordered short-first.
+        let input = "use src::foo::bar; use crate::foo::bar;";
+        let out = apply_rename_pairs(input, &pairs).unwrap();
+        assert_eq!(out, "use src::baz::qux; use crate::baz::qux;");
+    }
+
+    #[test]
+    fn does_not_touch_unrelated_identifier_named_like_file_stem() {
+        let pairs = rename_stem_pairs("src::foo::bar", "src::baz::qux");
+        // Bare `bar` variables must remain untouched - this was the
+        // regression caused by the previous rel_stem regex.
+        let input = "let bar = 1;\nfn bar_ext() {}\nuse crate::foo::bar;";
+        let out = apply_rename_pairs(input, &pairs).unwrap();
+        assert!(out.contains("let bar = 1;"), "local var kept: {out}");
+        assert!(out.contains("fn bar_ext()"), "unrelated name kept: {out}");
+        assert!(
+            out.contains("use crate::baz::qux;"),
+            "import rewritten: {out}"
+        );
+    }
+
+    #[test]
+    fn preserves_word_boundary() {
+        let pairs = rename_stem_pairs("foo::bar", "baz::qux");
+        // `foo::barrier` must not match `foo::bar`.
+        let input = "use foo::bar; use foo::barrier;";
+        let out = apply_rename_pairs(input, &pairs).unwrap();
+        assert!(out.contains("use baz::qux;"));
+        assert!(out.contains("use foo::barrier;"));
     }
 }

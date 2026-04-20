@@ -4,7 +4,7 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join, relative, isAbsolute } from "path";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 
 type GuardState = "READY" | "INDEXING" | "UNAVAILABLE" | "STALE";
 type GuardPayloadType = "DENIED_BUILTIN_CODE_TOOL" | "RISK_ACK_REQUIRED";
@@ -119,8 +119,15 @@ interface FileInfo {
 
 function queryFileInfo(dbPath: string, relPath: string): FileInfo | null {
   try {
-    const result = execSync(
-      `sqlite3 -json "${dbPath}" "SELECT pagerank, (SELECT COUNT(*) FROM edges WHERE to_file = files.id) as blast FROM files WHERE path = '${relPath.replace(/'/g, "''")}';"`,
+    // execFileSync runs sqlite3 directly (no shell), so `dbPath` and the SQL
+    // text cannot be interpreted as shell syntax. The path value is still
+    // concatenated into SQL, so escape the only SQL metachar we need - the
+    // single quote - and rely on SQLite's string literal rules.
+    const sqlQuotedPath = relPath.replace(/'/g, "''");
+    const sql = `SELECT pagerank, (SELECT COUNT(*) FROM edges WHERE to_file = files.id) as blast FROM files WHERE path = '${sqlQuotedPath}';`;
+    const result = execFileSync(
+      "sqlite3",
+      ["-json", dbPath, sql],
       { timeout: 3000, encoding: "utf-8" }
     );
     const rows = JSON.parse(result) as Array<{ pagerank?: number; blast?: number }>;

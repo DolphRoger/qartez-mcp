@@ -287,20 +287,48 @@ fn expand_roots_with_workspaces(roots: Vec<PathBuf>) -> (Vec<PathBuf>, HashMap<P
     let mut seen = std::collections::HashSet::new();
     let mut all_aliases = HashMap::new();
     for root in &roots {
-        let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if seen.insert(canonical.clone()) {
+        let canonical = normalize_for_dedup(root);
+        if seen.insert(canonical) {
             expanded.push(root.clone());
         }
         let (members, aliases) = detect_workspace_members(root);
         all_aliases.extend(aliases);
         for member in members {
-            let member_canonical = member.canonicalize().unwrap_or_else(|_| member.clone());
+            let member_canonical = normalize_for_dedup(&member);
             if seen.insert(member_canonical) {
                 expanded.push(member);
             }
         }
     }
     (expanded, all_aliases)
+}
+
+/// Produce a stable key for deduplicating roots. Prefer filesystem-canonical
+/// form (resolves symlinks, absolute path), but fall back to an absolute +
+/// lexically-normalized form when canonicalize fails (missing path, broken
+/// symlink, insufficient permissions). The fallback collapses `.` and `..`
+/// components without touching the filesystem, so two spellings of the same
+/// missing directory (e.g. `foo` and `foo/../foo`) share a dedup key.
+///
+/// Pre-fix this function used `canonicalize().unwrap_or_else(|_| path.clone())`,
+/// which kept the raw user input on failure and let different spellings of
+/// the same root both escape dedup.
+fn normalize_for_dedup(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Expand a path string relative to `base`, handling `~/` home expansion.
@@ -439,5 +467,70 @@ Relative = "subproject"
 
         assert_eq!(aliases.get(&other_canonical).unwrap(), "Other");
         assert_eq!(aliases.get(&sub_canonical).unwrap(), "Relative");
+    }
+
+    /// Two PathBuf values that point at the same real directory must produce
+    /// the same dedup key even when one form is canonical and the other isn't.
+    #[test]
+    fn normalize_for_dedup_matches_canonical_form() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("project");
+        std::fs::create_dir_all(&real).unwrap();
+
+        // Construct a non-canonical (has `..`) view of the same directory.
+        let dotted = tmp.path().join("project").join("..").join("project");
+        assert!(dotted.exists());
+
+        let key_real = normalize_for_dedup(&real);
+        let key_dotted = normalize_for_dedup(&dotted);
+        assert_eq!(
+            key_real, key_dotted,
+            "logically-equal paths must share a dedup key"
+        );
+    }
+
+    /// When canonicalize fails (path doesn't exist), the fallback must still
+    /// produce a stable absolute key so duplicates dedup correctly. Pre-fix,
+    /// this path returned `path.clone()` verbatim and a relative vs absolute
+    /// spelling of the same missing directory escaped dedup.
+    #[test]
+    fn normalize_for_dedup_falls_back_for_missing_path() {
+        // Non-existent path - canonicalize will fail.
+        let missing_abs = PathBuf::from("/nonexistent/qartez/test/path");
+        let k1 = normalize_for_dedup(&missing_abs);
+        let k2 = normalize_for_dedup(&missing_abs);
+        assert_eq!(k1, k2, "same input must yield same key");
+        assert!(k1.is_absolute(), "fallback must produce an absolute key");
+
+        // Relative path dedup: the cwd is stable within one process, so
+        // std::path::absolute is deterministic. Two identical relative paths
+        // must share a key.
+        let missing_rel = PathBuf::from("does-not-exist-xyz");
+        let rk1 = normalize_for_dedup(&missing_rel);
+        let rk2 = normalize_for_dedup(&missing_rel);
+        assert_eq!(rk1, rk2);
+    }
+
+    /// The pre-fix bug: when canonicalize fails, `unwrap_or_else(|_| root.clone())`
+    /// kept the non-canonical form, so two different spellings of the same root
+    /// both survived dedup. The new helper normalizes them through
+    /// `std::path::absolute`, collapsing spellings even for missing paths.
+    #[test]
+    fn expand_roots_dedups_different_spellings_of_same_missing_path() {
+        use std::collections::HashSet;
+        // Relative vs absolute forms of "./foo/../foo" (all point at cwd/foo).
+        let rel_a = PathBuf::from("foo");
+        let rel_b = PathBuf::from("./foo");
+        let rel_c = PathBuf::from("foo/../foo");
+
+        let mut keys: HashSet<PathBuf> = HashSet::new();
+        keys.insert(normalize_for_dedup(&rel_a));
+        keys.insert(normalize_for_dedup(&rel_b));
+        keys.insert(normalize_for_dedup(&rel_c));
+        assert_eq!(
+            keys.len(),
+            1,
+            "all three spellings must collapse to the same dedup key"
+        );
     }
 }
