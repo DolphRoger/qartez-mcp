@@ -187,32 +187,40 @@ impl QartezServer {
             return Ok(out);
         }
 
-        let remaining_lines: Vec<&str> = lines
+        // Compute the post-removal source content, collapsing blank lines
+        // only at the seam where the symbol used to live. The previous
+        // `while contains("\n\n\n")` sweep flattened every three-line gap
+        // in the file, quietly destroying intentional paragraph separators
+        // far from the extraction site.
+        let mut remaining_lines: Vec<&str> = lines
             .iter()
             .enumerate()
             .filter(|(i, _)| *i < start_idx || *i >= end_idx)
             .map(|(_, l)| *l)
             .collect();
+        if start_idx > 0
+            && start_idx < remaining_lines.len()
+            && remaining_lines[start_idx - 1].trim().is_empty()
+            && remaining_lines[start_idx].trim().is_empty()
+        {
+            remaining_lines.remove(start_idx);
+        }
         // `str::lines` strips the trailing newline, so `join("\n")` loses the
         // final `\n`. Preserve the POSIX trailing newline when the source had
         // one to avoid phantom diff lines in git.
         let preserve_trailing_newline = source_content.ends_with('\n');
-        let new_source = remaining_lines.join("\n");
-        if new_source.trim().is_empty() && remaining_lines.len() <= 1 {
-            std::fs::write(&source_abs, "")
-                .map_err(|e| format!("Cannot write {}: {e}", source_abs.display()))?;
-        } else {
-            let mut cleaned = new_source.clone();
-            while cleaned.contains("\n\n\n") {
-                cleaned = cleaned.replace("\n\n\n", "\n\n");
-            }
-            if preserve_trailing_newline && !cleaned.ends_with('\n') {
-                cleaned.push('\n');
-            }
-            std::fs::write(&source_abs, &cleaned)
-                .map_err(|e| format!("Cannot write {}: {e}", source_abs.display()))?;
+        let mut new_source = remaining_lines.join("\n");
+        if preserve_trailing_newline && !new_source.is_empty() && !new_source.ends_with('\n') {
+            new_source.push('\n');
         }
+        let source_should_be_blank = new_source.trim().is_empty() && remaining_lines.len() <= 1;
 
+        // Write the target file FIRST. A failure mid-way (disk full,
+        // permission denied, read-only filesystem) leaves the source file
+        // intact so the caller can retry without losing the extracted
+        // symbol. The previous source-first order truncated the source
+        // before the target was safely on disk, turning a transient write
+        // error into silent data loss.
         if target_abs.exists() {
             let existing = std::fs::read_to_string(&target_abs)
                 .map_err(|e| format!("Cannot read {}: {e}", target_abs.display()))?;
@@ -230,6 +238,18 @@ impl QartezServer {
             }
             std::fs::write(&target_abs, format!("{extracted_code}\n"))
                 .map_err(|e| format!("Cannot write {}: {e}", target_abs.display()))?;
+        }
+
+        // With the target safely on disk, remove the symbol from the
+        // source. A failure here leaves a duplicate definition - a visible
+        // compile error the user can resolve by hand - rather than silent
+        // data loss.
+        if source_should_be_blank {
+            std::fs::write(&source_abs, "")
+                .map_err(|e| format!("Cannot write {}: {e}", source_abs.display()))?;
+        } else {
+            std::fs::write(&source_abs, &new_source)
+                .map_err(|e| format!("Cannot write {}: {e}", source_abs.display()))?;
         }
 
         let mut import_updates = 0;

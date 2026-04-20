@@ -1535,6 +1535,21 @@ fn sanitize_fts_query_special_chars_wrapped() {
 }
 
 #[test]
+fn sanitize_fts_query_misplaced_asterisks_wrapped() {
+    // FTS5 only accepts `*` as a trailing prefix marker. A leading,
+    // embedded, or standalone `*` is a parse error - previous behavior
+    // let these pass through verbatim, which surfaced as an FTS parse
+    // failure at query time instead of the intended quoted-phrase match.
+    assert_eq!(sanitize_fts_query("*foo"), "\"*foo\"");
+    assert_eq!(sanitize_fts_query("foo*bar"), "\"foo*bar\"");
+    assert_eq!(sanitize_fts_query("*"), "\"*\"");
+    assert_eq!(sanitize_fts_query("**"), "\"**\"");
+    // Legitimate trailing-prefix queries still pass through unchanged.
+    assert_eq!(sanitize_fts_query("foo*"), "foo*");
+    assert_eq!(sanitize_fts_query("a*"), "a*");
+}
+
+#[test]
 fn qartez_grep_budget_respected() {
     let (server, _dir) = setup_scale(100);
     for budget in [50, 200, 500, 1000] {

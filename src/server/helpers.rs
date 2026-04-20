@@ -278,13 +278,25 @@ pub(super) fn compute_cochange_pairs(
         let Ok(diff) = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) else {
             continue;
         };
+        // Collect both the pre- and post-commit paths from each delta so
+        // deletions (empty `new_file`) and renames (diverging old vs. new
+        // paths) still contribute to the co-change tally. Relying solely
+        // on `new_file` silently dropped these cases, under-counting real
+        // signal for files that were moved or removed in a commit.
         let mut files: Vec<String> = diff
             .deltas()
-            .filter_map(|d| {
-                d.new_file()
+            .flat_map(|d| {
+                let old = d
+                    .old_file()
                     .path()
                     .and_then(|p| p.to_str())
-                    .map(|s| s.to_string())
+                    .map(|s| s.to_string());
+                let new = d
+                    .new_file()
+                    .path()
+                    .and_then(|p| p.to_str())
+                    .map(|s| s.to_string());
+                [old, new].into_iter().flatten()
             })
             .collect();
         files.sort();

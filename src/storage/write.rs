@@ -1169,12 +1169,10 @@ mod tests {
             let mut stmt = conn
                 .prepare("SELECT path FROM files ORDER BY path")
                 .unwrap();
-            let rows = stmt
-                .query_map([], |r| r.get::<_, String>(0))
+            stmt.query_map([], |r| r.get::<_, String>(0))
                 .unwrap()
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap();
-            rows
+                .unwrap()
         };
         assert_eq!(
             survivors,

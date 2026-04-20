@@ -259,9 +259,15 @@ fn start_notify_watcher(
                 EventKind::Remove(_) => (Vec::new(), filtered),
                 EventKind::Modify(ModifyKind::Name(RenameMode::From)) => (Vec::new(), filtered),
                 EventKind::Modify(ModifyKind::Name(RenameMode::To)) => (filtered, Vec::new()),
-                EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if filtered.len() >= 2 => {
-                    let (from, to) = filtered.split_first().expect("len >= 2");
-                    (to.to_vec(), vec![from.clone()])
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if filtered.len() == 2 => {
+                    // `notify` emits exactly two paths for a `Both` rename:
+                    // `[from, to]`. Anything else is backend noise, not a
+                    // real rename, so fall through to the existence-check
+                    // branch instead of treating every non-first entry as
+                    // a new destination.
+                    let from = filtered[0].clone();
+                    let to = filtered[1].clone();
+                    (vec![to], vec![from])
                 }
                 EventKind::Modify(ModifyKind::Name(_)) => {
                     let mut changed = Vec::new();

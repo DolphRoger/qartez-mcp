@@ -217,11 +217,29 @@ pub(super) fn rename_stem_pairs(old_full: &str, new_full: &str) -> Vec<(String, 
     // leaves at least one `::` on both sides. Single-segment suffixes
     // (`bar` → `qux`) are rejected on purpose - they would word-boundary
     // match unrelated identifiers that happen to share the stem.
+    let mut suffix_emitted = false;
     if prefix_len > 0 && prefix_len < old_segs.len() && prefix_len < new_segs.len() {
         let old_suffix = old_segs[prefix_len..].join("::");
         let new_suffix = new_segs[prefix_len..].join("::");
         if old_suffix.contains("::") && new_suffix.contains("::") && old_suffix != new_suffix {
             pairs.push((old_suffix, new_suffix));
+            suffix_emitted = true;
+        }
+    }
+
+    // When the divergent suffix is a bare single segment (e.g. renaming
+    // `src/foo.rs` → `src/baz.rs`, yielding suffix `foo` → `baz`), the
+    // suffix pair is skipped above because `\bfoo\b` would rewrite any
+    // local variable or parameter sharing the name. Fall back to a
+    // `crate::`-prefixed pair: Rust imports reach the module through
+    // `use crate::foo::...`, and the `crate::` prefix disambiguates the
+    // match so unrelated identifiers are safe. Without this, root-level
+    // Rust file renames left every `crate::`-relative importer dangling.
+    if !suffix_emitted && old_segs.len() > 1 && new_segs.len() > 1 && old_segs[0] == new_segs[0] {
+        let old_crate = format!("crate::{}", old_segs[1..].join("::"));
+        let new_crate = format!("crate::{}", new_segs[1..].join("::"));
+        if old_crate != new_crate {
+            pairs.push((old_crate, new_crate));
         }
     }
 
@@ -326,14 +344,59 @@ mod rename_pairs_tests {
     }
 
     #[test]
-    fn skips_bare_single_segment_suffix() {
-        // Only the full stem - suffix `bar` → `qux` would over-match bare
-        // identifiers and is intentionally dropped.
+    fn emits_crate_prefixed_pair_for_bare_single_segment_suffix() {
+        // The bare suffix pair (`bar` → `qux`) is still dropped - it would
+        // over-match local variables and parameters - but a `crate::`-
+        // prefixed pair is emitted so `use crate::foo::bar::X;` importers
+        // still get rewritten. The `crate::` prefix keeps the match
+        // unambiguous even for a single-segment suffix.
         let pairs = rename_stem_pairs("src::foo::bar", "src::foo::qux");
         assert_eq!(
             pairs,
-            vec![("src::foo::bar".into(), "src::foo::qux".into())]
+            vec![
+                ("src::foo::bar".into(), "src::foo::qux".into()),
+                ("crate::foo::bar".into(), "crate::foo::qux".into()),
+            ]
         );
+    }
+
+    #[test]
+    fn root_level_rust_file_rename_emits_crate_pair() {
+        // Regression guard: renaming `src/foo.rs` → `src/baz.rs` yields
+        // stems `src::foo` → `src::baz`. The divergent suffix is the bare
+        // `foo` → `baz` so the suffix pair is dropped, but the crate pair
+        // `(crate::foo, crate::baz)` must be emitted so `use crate::foo`
+        // importers get rewritten. Without it the crate fails to build.
+        let pairs = rename_stem_pairs("src::foo", "src::baz");
+        assert_eq!(
+            pairs,
+            vec![
+                ("src::foo".into(), "src::baz".into()),
+                ("crate::foo".into(), "crate::baz".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn root_level_rust_file_rename_rewrites_crate_imports() {
+        let pairs = rename_stem_pairs("src::foo", "src::baz");
+        let input = "use crate::foo::Bar;\nuse crate::foo;\nlet x = crate::foo::call();";
+        let out = apply_rename_pairs(input, &pairs).unwrap();
+        assert_eq!(
+            out,
+            "use crate::baz::Bar;\nuse crate::baz;\nlet x = crate::baz::call();"
+        );
+    }
+
+    #[test]
+    fn crate_pair_does_not_rewrite_unrelated_identifiers() {
+        // The whole point of refusing the bare suffix is to protect local
+        // identifiers named like the stem. Verify that the `crate::`-
+        // prefixed pair keeps that invariant.
+        let pairs = rename_stem_pairs("src::foo", "src::baz");
+        let input = "let foo = 1;\nfn foo_ext() {}\nstruct S { foo: u32 }\nlet x = obj.foo();";
+        let out = apply_rename_pairs(input, &pairs).unwrap();
+        assert_eq!(out, input);
     }
 
     #[test]

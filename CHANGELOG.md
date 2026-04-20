@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.2] - 2026-04-20
+
+### Fixed
+
+- **`qartez_move` preserves intentional blank-line separators** - the post-extraction blank-line collapse now folds a single adjacent pair at the extraction seam only, instead of globally flattening every triple-newline gap in the file. Multi-blank separators between unrelated symbol groups survive the move. Regression test in `tests/tools.rs` covers a `fn a` / `const X` / `fn b` layout with two-blank separators.
+- **`qartez_move` writes target before source** - the target file now lands on disk first, so a mid-operation write failure (disk full, read-only filesystem, permission denied) leaves the source intact and the caller can retry. The previous source-first order truncated the source before the target was safely written, converting a transient write error into silent data loss.
+- **`qartez_rename_file` rewrites `use crate::<old>` importers for root-level Rust files** - renaming `src/foo.rs` → `src/baz.rs` now also emits a `crate::foo` → `crate::baz` rewrite pair so every `use crate::foo::...;` importer is updated. Before, only the internal `src::foo` stem was emitted (a form that never appears in real Rust code), so crate-relative importers were silently left dangling. The `crate::` prefix keeps the match unambiguous even when the divergent suffix is a bare single segment, so unrelated local identifiers sharing the stem are unaffected.
+- **`sanitize_fts_query` quotes misplaced `*` wildcards** - FTS5 only accepts `*` as a trailing prefix marker on an otherwise alphanumeric token (`foo*`). Leading, embedded, or standalone `*` used to pass through verbatim, surfacing as an FTS parse failure at query time. Such inputs now take the quoted-phrase path and become a literal match. Legitimate `foo*` prefix queries are unchanged.
+- **File watcher `RenameMode::Both` requires exactly two paths** - `notify` emits `[from, to]` for a real rename, so anything with a different shape is backend noise and now falls through to the existence-check branch instead of being treated as a rename. The old `len >= 2` guard misread 3-plus-entry events as "one source, many destinations", producing spurious index updates.
+- **`qartez_cochange` counts deletions and renames** - the per-commit delta walker now collects both the pre- and post-commit paths from each diff delta, so commits that delete or rename a file still contribute signal. The previous path-only-from-`new_file` branch silently dropped these cases, under-counting real co-change for files that were moved or removed.
+
 ## [0.8.1] - 2026-04-20
 
 ### Fixed

@@ -3914,3 +3914,116 @@ fn test_qartez_move_rewrites_glob_importer() {
         "glob importer caller.rs must appear in preview, got: {preview}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: qartez_move preserves intentional blank-line separators
+// ---------------------------------------------------------------------------
+#[test]
+fn test_qartez_move_preserves_blank_line_separators() {
+    // Before the fix, qartez_move globally collapsed every run of three
+    // or more consecutive newlines down to two, silently destroying
+    // intentional multi-line separators between symbol groups - far
+    // beyond the extraction site. Verify that a two-blank separator
+    // between unrelated items survives a move operation.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    // `a` and `X` are separated by a two-blank (3-newline) separator;
+    // `X` and `b` by another. Only `b` is being moved, so the first
+    // separator must be untouched by the operation.
+    let original = "pub fn a() {}\n\n\npub const X: i32 = 1;\n\n\npub fn b() {}\n";
+    fs::write(src.join("lib.rs"), original).unwrap();
+    fs::write(src.join("other.rs"), "pub fn anchor() {}\n").unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, root, false).unwrap();
+    let server = QartezServer::new(conn, root.to_path_buf(), 300);
+
+    let _ = server
+        .call_tool_by_name(
+            "qartez_move",
+            json!({
+                "symbol": "b",
+                "to_file": "src/other.rs",
+                "apply": true,
+            }),
+        )
+        .expect("qartez_move must succeed");
+
+    let new_source = fs::read_to_string(src.join("lib.rs")).unwrap();
+    assert!(
+        new_source.contains("pub fn a() {}\n\n\npub const X: i32 = 1;"),
+        "two-blank separator between `a` and `X` must survive the move, got: {new_source:?}"
+    );
+    assert!(
+        !new_source.contains("pub fn b"),
+        "symbol `b` must be extracted, got: {new_source:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: qartez_rename_file rewrites `use crate::<old>` importers
+// ---------------------------------------------------------------------------
+#[test]
+fn test_qartez_rename_file_updates_crate_imports() {
+    // Renaming a root-level Rust file must rewrite every
+    // `use crate::<old>::...;` importer to the new module path. Before
+    // the fix, the rename-pair generator only emitted the internal
+    // `src::<old>` stem - a form that never appears in real Rust code -
+    // so every `crate::`-relative importer was silently left dangling.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(src.join("lib.rs"), "pub mod foo;\npub mod caller;\n").unwrap();
+    fs::write(src.join("foo.rs"), "pub fn do_work() {}\n").unwrap();
+    fs::write(
+        src.join("caller.rs"),
+        "use crate::foo::do_work;\n\npub fn entry() {\n    do_work();\n}\n",
+    )
+    .unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, root, false).unwrap();
+    let server = QartezServer::new(conn, root.to_path_buf(), 300);
+
+    let result = server
+        .call_tool_by_name(
+            "qartez_rename_file",
+            json!({
+                "from": "src/foo.rs",
+                "to": "src/baz.rs",
+                "apply": true,
+            }),
+        )
+        .expect("qartez_rename_file must succeed");
+    assert!(
+        result.contains("renamed"),
+        "expected rename confirmation: {result}"
+    );
+
+    let caller = fs::read_to_string(src.join("caller.rs")).unwrap();
+    assert!(
+        caller.contains("use crate::baz::do_work;"),
+        "`use crate::<old>` must be rewritten to `crate::<new>`, got: {caller:?}"
+    );
+    assert!(
+        !caller.contains("use crate::foo"),
+        "old crate-relative import must be gone, got: {caller:?}"
+    );
+
+    let lib = fs::read_to_string(src.join("lib.rs")).unwrap();
+    assert!(
+        lib.contains("pub mod baz;"),
+        "parent `mod foo;` declaration must be rewritten, got: {lib:?}"
+    );
+}

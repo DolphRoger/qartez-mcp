@@ -4,14 +4,19 @@ use crate::error::Result;
 use crate::storage::models::{self, CoChangeRow, EdgeRow, FileRow, SymbolRow};
 
 /// Sanitize user input for FTS5 MATCH queries. Plain alphanumeric tokens
-/// (with `_` and `*`) pass through; anything else is wrapped in a
-/// double-quoted phrase so FTS5 treats it as a literal, preventing parse
-/// errors from operators like `AND`, `OR`, `NOT`, or column filters (`:`).
+/// (with `_`, plus an optional trailing `*` for prefix matching) pass
+/// through; anything else is wrapped in a double-quoted phrase so FTS5
+/// treats it as a literal, preventing parse errors from operators like
+/// `AND`, `OR`, `NOT`, column filters (`:`), or misplaced wildcards.
+///
+/// FTS5 only accepts `*` as a trailing prefix marker on an otherwise
+/// alphanumeric token (`foo*`). A leading, embedded, or standalone `*`
+/// is a parse error, so such inputs go through the quoted-phrase path.
 pub fn sanitize_fts_query(raw: &str) -> String {
     let is_plain = !raw.is_empty()
-        && raw
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '*');
+        && raw.char_indices().all(|(i, c)| {
+            c.is_alphanumeric() || c == '_' || (c == '*' && i > 0 && i == raw.len() - 1)
+        });
     if is_plain {
         let upper = raw.to_uppercase();
         if matches!(upper.as_str(), "AND" | "OR" | "NOT" | "NEAR") {
