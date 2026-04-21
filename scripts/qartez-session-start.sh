@@ -36,11 +36,15 @@ for marker in .git Cargo.toml package.json pyproject.toml go.mod; do
 done
 [ "$HAS_MARKER" -eq 0 ] && exit 0
 
-# Locate the qartez-mcp binary (respects QARTEZ_BINARY override)
+# Locate the qartez server binary (respects QARTEZ_BINARY override).
+# Prefers the canonical `qartez` name; falls back to the legacy `qartez-mcp`
+# symlink for older installs.
 BINARY="${QARTEZ_BINARY:-}"
 if [ -z "$BINARY" ]; then
     for candidate in \
+        "$HOME/.local/bin/qartez" \
         "$HOME/.local/bin/qartez-mcp" \
+        "$(command -v qartez 2>/dev/null || true)" \
         "$(command -v qartez-mcp 2>/dev/null || true)"; do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
             BINARY="$candidate"

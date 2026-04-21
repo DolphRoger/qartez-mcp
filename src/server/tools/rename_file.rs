@@ -90,13 +90,6 @@ impl QartezServer {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Cannot create dirs for {}: {e}", to_abs.display()))?;
         }
-        std::fs::rename(&from_abs, &to_abs).map_err(|e| {
-            format!(
-                "Cannot rename {} -> {}: {e}",
-                from_abs.display(),
-                to_abs.display()
-            )
-        })?;
 
         let mut updated_count = 0;
         let mut failed_writes: Vec<String> = Vec::new();
@@ -149,6 +142,21 @@ impl QartezServer {
                 }
             }
         }
+
+        // Rename happens LAST so a mid-way write failure above leaves the
+        // source file at its original path and the user can re-run the
+        // tool to finish the partial operation - apply_rename_pairs is
+        // idempotent over already-rewritten content. The previous order
+        // (rename first, importers second) stranded importers pointing
+        // at a vanished path on any partial write failure, matching the
+        // target-first discipline already used by qartez_mv.
+        std::fs::rename(&from_abs, &to_abs).map_err(|e| {
+            format!(
+                "Cannot rename {} -> {}: {e}",
+                from_abs.display(),
+                to_abs.display()
+            )
+        })?;
 
         let warn = if failed_writes.is_empty() {
             String::new()

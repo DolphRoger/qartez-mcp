@@ -280,6 +280,15 @@ pub(super) fn find_parent_mod_file(
     let parent = path.parent()?;
     let file_name = path.file_name()?.to_str()?;
 
+    // Crate entry points have no parent `mod` declaration - Cargo.toml
+    // registers them directly. Without this early return a rename of
+    // `src/lib.rs` would pick up a sibling `src/mod.rs` or `src.rs` as a
+    // "parent" and the caller would rewrite an unrelated file's
+    // `mod lib;` / `mod main;` lines.
+    if file_name == "lib.rs" || file_name == "main.rs" {
+        return None;
+    }
+
     let effective_parent: std::path::PathBuf = if file_name == "mod.rs" {
         parent.parent()?.to_path_buf()
     } else {

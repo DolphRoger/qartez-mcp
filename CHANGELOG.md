@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.3] - 2026-04-21
+
+### Fixed
+
+- **Windows installation with canonical `qartez` binary name** - `qartez-setup` now locates the MCP server via a new `find_server_binary` helper that tries the canonical `qartez` name first and falls back to the legacy `qartez-mcp` symlink. Windows `install.ps1` only ships `qartez.exe` (hardlinks / symlinks need elevation), so the previous hardcoded `qartez-mcp` lookup blocked IDE configuration on Windows with "qartez-mcp binary not found". Fixes #24.
+- **Multi-root embeddings resolve to the right root on file-name collisions** - `resolve_abs_path` now iterates `project_roots` directly instead of keying a `HashMap` by `file_name()`. Two roots sharing a final path component (e.g. `frontend/web` + `backend/web`) used to collapse into a single HashMap entry, so half of a multi-root semantic index resolved to the wrong filesystem path. The first root in order now wins deterministically, matching `helpers::resolve_prefixed_path`.
+- **Incremental indexer skips out-of-root paths instead of writing garbage keys** - `delete_single_file` and `try_reingest_changed_file` used to fall through to the absolute path on `strip_prefix` failure, producing a `rel_path` like `workspace1//tmp/foo.rs` that could never be looked up again. Out-of-root paths (usually a symlink or mount-point escape out of the watched tree) are now surfaced as a `tracing::warn!` and skipped.
+- **`qartez_rename_file` renames the file last** - the filesystem `rename` now happens after importer rewrites, matching the target-first discipline already used by `qartez_move`. A mid-way write failure used to strand importers pointing at a vanished source path; the source now stays in place on partial failure and the tool is idempotent on retry.
+- **`find_parent_mod_file` rejects crate entry points** - renaming `src/lib.rs` or `src/main.rs` no longer scans for a parent `mod` declaration. `Cargo.toml` registers crate roots directly, so a sibling `src/mod.rs` or `src.rs` is never a parent module; without the early return, the caller could rewrite unrelated `mod lib;` / `mod main;` lines in those siblings.
+- **`parse_semver` strips SemVer §10 build metadata** - versions like `v1.2.3+build1`, `v1.2.3+linux-gnu`, or `v1.2.3-rc1+build.42` now parse to `(1, 2, 3, ...)` by stripping the `+...` segment before the prerelease split. Without this, `parts[2].parse::<u32>()` would fail on `"3+build1"` and the auto-updater silently refused to roll forward onto any release whose tag carried build metadata.
+- **Watcher recovers from a poisoned DB mutex** - `Watcher::reindex` now mirrors the `into_inner()` recovery already used for the ignore-cache lock, so a one-off panic during incremental indexing no longer kills the long-running watcher task for the rest of the session. SQLite rolls the open transaction back when the guard drops, so the `Connection` remains usable.
+- **`safe_resolve` strips wrapper syntax from path arguments** - clients (or copied tool traces) that pass values like `` `src/main.rs` ``, `"src/main.rs"`, `'src/main.rs'`, or `[file_path=src/main.rs]` now resolve cleanly. A new `normalize_user_path_arg` shim strips matching quote / backtick pairs and the three recognised bracketed-assignment forms (`[file_path=...]`, `[path=...]`, `[file=...]`) iteratively, while preserving literal filenames like `[notes].md` or `file=notes.md`. Traversal rejection still runs after normalization, so `` `../secret.txt` `` remains blocked.
+
+### Contributors
+
+- **Zir** ([@Zireael](https://github.com/Zireael)) - added the `safe_resolve` compatibility shim that normalizes wrapper syntax around path arguments (quotes, backticks, bracketed assignments), with regression tests covering acceptance, traversal rejection, and literal-filename preservation (#18).
+
 ## [0.8.2] - 2026-04-20
 
 ### Fixed

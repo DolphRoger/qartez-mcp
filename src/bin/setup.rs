@@ -620,7 +620,7 @@ fn strip_jsonc(text: &str) -> String {
     re.replace_all(&out, "$1").into_owned()
 }
 
-/// Find the qartez-mcp binary, checking standard locations.
+/// Find a qartez binary by name, checking standard locations.
 fn find_binary(name: &str) -> Option<PathBuf> {
     let home = home_dir();
 
@@ -646,6 +646,14 @@ fn find_binary(name: &str) -> Option<PathBuf> {
     }
     // Check PATH
     which_in_path(name)
+}
+
+/// Locate the MCP server binary. Prefers the canonical `qartez` name
+/// (matches `[[bin]]` in Cargo.toml); falls back to `qartez-mcp` for the
+/// legacy Unix symlink that install.sh still creates. Windows installs
+/// ship only `qartez.exe`, so the primary lookup is what makes Windows work.
+fn find_server_binary() -> Option<PathBuf> {
+    find_binary("qartez").or_else(|| find_binary("qartez-mcp"))
 }
 
 fn which_in_path(name: &str) -> Option<PathBuf> {
@@ -2608,15 +2616,17 @@ fn run() -> anyhow::Result<()> {
     }
 
     // Resolve binaries
-    let bin = find_binary("qartez-mcp").map(|p| p.to_string_lossy().into_owned());
+    let bin = find_server_binary().map(|p| p.to_string_lossy().into_owned());
     let guard_bin = find_binary("qartez-guard").map(|p| p.to_string_lossy().into_owned());
 
     if bin.is_none() && !cli.uninstall {
         anyhow::bail!(
-            "qartez-mcp binary not found. Searched:\n\
-             \x20   - ~/.local/bin/qartez-mcp\n\
+            "qartez binary not found. Searched:\n\
+             \x20   - ~/.local/bin/qartez (and legacy qartez-mcp)\n\
+             \x20   - directory of this executable\n\
              \x20   - $PATH\n\n\
-             \x20   Run 'make build && make deploy' first."
+             \x20   Run 'make build && make deploy' first, or reinstall via\n\
+             \x20   https://qartez.dev/install (Unix) or install.ps1 (Windows)."
         );
     }
     let bin_path = bin.unwrap_or_default();
@@ -2783,8 +2793,8 @@ fn run_session_start() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Locate qartez-mcp binary
-    let binary = find_binary("qartez-mcp").or_else(|| {
+    // Locate qartez server binary
+    let binary = find_server_binary().or_else(|| {
         // Fallback: check QARTEZ_BINARY env var
         std::env::var("QARTEZ_BINARY")
             .ok()
@@ -2920,6 +2930,13 @@ const STABILITY_PRE_RELEASE: u8 = 0;
 
 fn parse_semver(s: &str) -> Option<(u32, u32, u32, u8)> {
     let s = s.trim().trim_start_matches('v');
+    // SemVer §10: build metadata appears after `+` and is ignored for
+    // precedence. Strip it before the prerelease split so `1.2.3+build1`
+    // and `1.2.3-rc1+build1` parse the same as their build-less forms -
+    // without this, `parts[2].parse::<u32>()` would fail on `"3+build1"`
+    // and the auto-updater would silently refuse to roll forward onto a
+    // release whose tag included build metadata.
+    let s = s.split_once('+').map(|(core, _)| core).unwrap_or(s);
     let (core, pre) = match s.split_once('-') {
         Some((core, pre)) => (core, Some(pre)),
         None => (s, None),
@@ -3382,6 +3399,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_semver_strips_build_metadata() {
+        // SemVer §10: build metadata trailing `+` does not affect precedence
+        // and must be ignored. Without this, a release tagged
+        // `v1.2.3+linux-gnu` would fail the `parts[2].parse::<u32>()` step
+        // and the auto-updater would silently refuse to roll forward.
+        assert_eq!(
+            parse_semver("1.2.3+build1"),
+            Some((1, 2, 3, STABILITY_STABLE))
+        );
+        assert_eq!(
+            parse_semver("v1.2.3+linux-gnu"),
+            Some((1, 2, 3, STABILITY_STABLE))
+        );
+        assert_eq!(
+            parse_semver("v1.2.3-rc1+build.42"),
+            Some((1, 2, 3, STABILITY_PRE_RELEASE))
+        );
+        assert_eq!(
+            parse_semver("1.2.3+20260421"),
+            Some((1, 2, 3, STABILITY_STABLE))
+        );
+    }
+
+    #[test]
     fn is_newer_prerelease_compared_by_core_version() {
         assert!(!is_newer_version("v1.0.0-rc1", "1.0.0"));
         assert!(is_newer_version("v1.0.1-beta", "1.0.0"));
@@ -3543,6 +3584,59 @@ mod tests {
         let _path = EnvGuard::set("PATH", &empty_path);
 
         assert!(find_cli_anywhere("definitely-not-installed-xyz").is_none());
+    }
+
+    /// Windows install.ps1 installs `qartez.exe` (no `qartez-mcp` symlink -
+    /// Windows hardlinks/symlinks need elevation). The Windows installer
+    /// leaves the setup binary to locate the server via PATH or the sibling
+    /// install dir. This regression test (issue #24) asserts that
+    /// `find_server_binary` finds the canonical `qartez` binary even when
+    /// the legacy `qartez-mcp` name is absent.
+    #[test]
+    fn find_server_binary_finds_qartez_without_legacy_symlink() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let empty_path = tmp.path().join("__empty_path_dir");
+        fs::create_dir_all(&empty_path).unwrap();
+        let _path = EnvGuard::set("PATH", &empty_path);
+
+        let local_bin = tmp.path().join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let bin_name = if cfg!(windows) {
+            "qartez.exe"
+        } else {
+            "qartez"
+        };
+        let bin_path = local_bin.join(bin_name);
+        fs::write(&bin_path, "").unwrap();
+
+        assert_eq!(find_server_binary(), Some(bin_path));
+    }
+
+    /// Legacy Unix installs created a `qartez-mcp -> qartez` symlink. Even
+    /// if only the legacy name is present (e.g. after a manual half-migrated
+    /// install), `find_server_binary` must still locate it.
+    #[test]
+    fn find_server_binary_falls_back_to_legacy_name() {
+        let _mu = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let empty_path = tmp.path().join("__empty_path_dir");
+        fs::create_dir_all(&empty_path).unwrap();
+        let _path = EnvGuard::set("PATH", &empty_path);
+
+        let local_bin = tmp.path().join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let legacy_name = if cfg!(windows) {
+            "qartez-mcp.exe"
+        } else {
+            "qartez-mcp"
+        };
+        let bin_path = local_bin.join(legacy_name);
+        fs::write(&bin_path, "").unwrap();
+
+        assert_eq!(find_server_binary(), Some(bin_path));
     }
 
     /// `~/.claude/local/claude` is the fallback emitted by Anthropic's

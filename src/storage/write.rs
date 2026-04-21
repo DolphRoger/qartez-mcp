@@ -476,14 +476,6 @@ pub fn rebuild_embeddings(
 ) -> Result<()> {
     conn.execute("DELETE FROM symbol_embeddings", [])?;
 
-    let root_map: std::collections::HashMap<String, &std::path::Path> = project_roots
-        .iter()
-        .filter_map(|r| {
-            r.file_name()
-                .map(|n| (n.to_string_lossy().into_owned(), r.as_path()))
-        })
-        .collect();
-
     let mut select = conn.prepare(
         "SELECT s.id, s.line_start, s.line_end, s.name, s.kind, f.path
          FROM symbols s
@@ -516,7 +508,7 @@ pub fn rebuild_embeddings(
     let mut pending: Vec<(i64, String)> = Vec::new();
 
     for (rel_path, syms) in &by_path {
-        let abs = resolve_abs_path(rel_path, project_roots, &root_map);
+        let abs = resolve_abs_path(rel_path, project_roots);
         let Ok(text) = std::fs::read_to_string(&abs) else {
             continue;
         };
@@ -566,14 +558,6 @@ pub fn embed_symbols_incremental(
         return Ok(());
     }
 
-    let root_map: std::collections::HashMap<String, &std::path::Path> = project_roots
-        .iter()
-        .filter_map(|r| {
-            r.file_name()
-                .map(|n| (n.to_string_lossy().into_owned(), r.as_path()))
-        })
-        .collect();
-
     // Delete stale embeddings for symbols in changed files.
     for &fid in file_ids {
         conn.execute(
@@ -616,7 +600,7 @@ pub fn embed_symbols_incremental(
     }
 
     for (rel_path, syms) in &by_path {
-        let abs = resolve_abs_path(rel_path, project_roots, &root_map);
+        let abs = resolve_abs_path(rel_path, project_roots);
         let Ok(text) = std::fs::read_to_string(&abs) else {
             continue;
         };
@@ -651,19 +635,29 @@ pub fn embed_symbols_incremental(
 
 /// Resolve a relative DB path to an absolute filesystem path, handling
 /// multi-root prefix resolution.
+///
+/// Iterates `project_roots` directly instead of building a
+/// `HashMap<file_name, root>`: when two roots share the same final path
+/// component (e.g. `frontend/web` + `backend/web`), the HashMap keyed by
+/// `file_name()` silently collapsed one into the other, so half of a
+/// multi-root index would resolve to the wrong filesystem path. Iteration
+/// picks the first matching root deterministically, matching the same
+/// discipline used by `helpers::resolve_prefixed_path`.
 #[cfg(feature = "semantic")]
-fn resolve_abs_path(
-    rel_path: &str,
-    project_roots: &[std::path::PathBuf],
-    root_map: &std::collections::HashMap<String, &std::path::Path>,
-) -> std::path::PathBuf {
+fn resolve_abs_path(rel_path: &str, project_roots: &[std::path::PathBuf]) -> std::path::PathBuf {
     if project_roots.len() > 1 {
         let p = std::path::Path::new(rel_path);
         if let Some(std::path::Component::Normal(first)) = p.components().next() {
             let first_str = first.to_string_lossy();
-            if let Some(root) = root_map.get(first_str.as_ref()) {
-                let remainder: std::path::PathBuf = p.components().skip(1).collect();
-                return root.join(remainder);
+            for root in project_roots {
+                if root
+                    .file_name()
+                    .map(|n| n.to_string_lossy() == first_str)
+                    .unwrap_or(false)
+                {
+                    let remainder: std::path::PathBuf = p.components().skip(1).collect();
+                    return root.join(remainder);
+                }
             }
         }
     }
@@ -1224,5 +1218,64 @@ mod tests {
             .query_row("SELECT path FROM files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(survivor, "aYb/x.rs");
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn resolve_abs_path_single_root_joins_without_prefix_match() {
+        // Single-root mode must bypass the iteration branch entirely - the
+        // path is joined onto the sole root regardless of what its first
+        // component is.
+        let root = std::path::PathBuf::from("/tmp/qartez-test-root");
+        let out = resolve_abs_path("src/lib.rs", &[root.clone()]);
+        assert_eq!(out, root.join("src/lib.rs"));
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn resolve_abs_path_multi_root_unique_filenames_resolve() {
+        let frontend = std::path::PathBuf::from("/tmp/qartez-test-frontend");
+        let backend = std::path::PathBuf::from("/tmp/qartez-test-backend");
+        let roots = vec![frontend.clone(), backend.clone()];
+
+        assert_eq!(
+            resolve_abs_path("qartez-test-frontend/src/app.ts", &roots),
+            frontend.join("src/app.ts")
+        );
+        assert_eq!(
+            resolve_abs_path("qartez-test-backend/src/main.rs", &roots),
+            backend.join("src/main.rs")
+        );
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn resolve_abs_path_multi_root_collision_picks_first_deterministically() {
+        // `frontend/web` and `backend/web` share file_name "web". The old
+        // HashMap-keyed lookup silently collapsed one into the other (which
+        // wins depended on HashMap insertion order). Iteration now guarantees
+        // the FIRST root in project_roots wins, which is both deterministic
+        // and lets callers control precedence via ordering.
+        let first = std::path::PathBuf::from("/tmp/qartez-test-frontend/web");
+        let second = std::path::PathBuf::from("/tmp/qartez-test-backend/web");
+        let roots = vec![first.clone(), second];
+
+        let resolved = resolve_abs_path("web/src/index.ts", &roots);
+        assert_eq!(resolved, first.join("src/index.ts"));
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn resolve_abs_path_unknown_prefix_falls_back_to_first_root() {
+        // Preserves the previous safety net: if the first path component
+        // does not match any root's file_name, return the path joined
+        // against the first root (consistent with helpers::resolve_prefixed_path
+        // single-root fallback in non-semantic code).
+        let first = std::path::PathBuf::from("/tmp/qartez-test-alpha");
+        let second = std::path::PathBuf::from("/tmp/qartez-test-beta");
+        let roots = vec![first.clone(), second];
+
+        let resolved = resolve_abs_path("unknown/src/foo.rs", &roots);
+        assert_eq!(resolved, first.join("unknown/src/foo.rs"));
     }
 }

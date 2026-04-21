@@ -3087,6 +3087,24 @@ fn find_parent_mod_file_rejects_non_rust() {
     assert!(find_parent_mod_file(dir.path(), "src/config.toml").is_none());
 }
 
+#[test]
+fn find_parent_mod_file_rejects_crate_roots() {
+    // Crate entry points have no parent `mod` declaration. Without an
+    // early return, `find_parent_mod_file` would surface a nearby
+    // `src/mod.rs` or `src.rs` as the "parent" of `src/lib.rs` /
+    // `src/main.rs`, and the caller would rewrite an unrelated file's
+    // `mod lib;` / `mod main;` lines.
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    fs::write(dir.path().join("src/main.rs"), "").unwrap();
+    fs::write(dir.path().join("src/mod.rs"), "mod lib;\nmod main;\n").unwrap();
+
+    assert_eq!(find_parent_mod_file(dir.path(), "src/lib.rs"), None);
+    assert_eq!(find_parent_mod_file(dir.path(), "src/main.rs"), None);
+}
+
 // =========================================================================
 // Section N: qartez_wiki
 // =========================================================================

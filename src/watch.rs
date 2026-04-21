@@ -112,7 +112,20 @@ impl Watcher {
     }
 
     fn reindex(&self, changed: &[PathBuf], deleted: &[PathBuf]) -> anyhow::Result<()> {
-        let conn = self.db.lock().expect("watcher db mutex poisoned");
+        // Mirror the `into_inner()` recovery already used by the ignore-cache
+        // lock at start_notify_watcher: a poisoned db mutex means a prior
+        // indexing operation panicked mid-way, but the Connection is still
+        // usable (sqlite rolls the open transaction back when the guard drops).
+        // Panicking here would kill the watcher task for the rest of the
+        // session - a long-running background loop should recover from a
+        // one-off parse or encode panic instead of going silent.
+        let conn = match self.db.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("watcher db mutex was poisoned; recovering");
+                poisoned.into_inner()
+            }
+        };
         index::incremental_index_with_prefix(
             &conn,
             &self.project_root,

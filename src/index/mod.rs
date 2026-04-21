@@ -1437,9 +1437,21 @@ fn delete_single_file(
     path_prefix: &str,
     path: &Path,
 ) -> Result<bool> {
+    // Paths outside `root` cannot be mapped to a DB row: concatenating an
+    // absolute path onto `path_prefix` would yield nonsense like
+    // "workspace1//tmp/foo.rs" that never matches a stored `files.path`.
+    // Surface the unusual event (typically a symlink or mount-point escape
+    // out of the watched tree) instead of silently returning Ok(false).
     let raw_rel = match path.strip_prefix(root) {
         Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
-        Err(_) => to_forward_slash(path.to_string_lossy().into_owned()),
+        Err(_) => {
+            tracing::warn!(
+                "incremental: delete target {} is outside root {}; skipping",
+                path.display(),
+                root.display()
+            );
+            return Ok(false);
+        }
     };
     let rel_path = if path_prefix.is_empty() {
         raw_rel
@@ -1465,9 +1477,19 @@ fn try_reingest_changed_file(
     pool: &ParserPool,
     indexed: &mut Vec<IndexedFile>,
 ) -> Result<bool> {
+    // Same invariant as `delete_single_file`: paths outside `root` would
+    // produce a garbage `rel_path` after prefix concatenation and the file
+    // would be ingested under a key that can never be looked up again.
     let raw_rel = match file_path.strip_prefix(root) {
         Ok(p) => to_forward_slash(p.to_string_lossy().into_owned()),
-        Err(_) => to_forward_slash(file_path.to_string_lossy().into_owned()),
+        Err(_) => {
+            tracing::warn!(
+                "incremental: changed file {} is outside root {}; skipping",
+                file_path.display(),
+                root.display()
+            );
+            return Ok(false);
+        }
     };
     let rel_path = if path_prefix.is_empty() {
         raw_rel.clone()
@@ -3327,6 +3349,26 @@ mod tests {
     }
 
     #[test]
+    fn delete_single_file_skips_path_outside_root() {
+        // Previously the strip_prefix fallback concatenated the absolute
+        // path onto path_prefix and a DB lookup for "workspace1//tmp/foo"
+        // silently missed, hiding symlink / mount-point escapes.
+        let tmp_root = TempDir::new().unwrap();
+        let tmp_other = TempDir::new().unwrap();
+        let outside = tmp_other.path().join("outside.ts");
+        fs::write(&outside, "export const a = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let result = delete_single_file(&tx, tmp_root.path(), "workspace1", &outside).unwrap();
+        assert!(
+            !result,
+            "out-of-root delete must return Ok(false) without touching the DB"
+        );
+    }
+
+    #[test]
     fn try_reingest_changed_file_reports_skip_for_missing_file() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -3348,6 +3390,43 @@ mod tests {
 
         assert!(!result, "missing file must report skip");
         assert!(indexed.is_empty());
+    }
+
+    #[test]
+    fn try_reingest_changed_file_skips_path_outside_root() {
+        // Previously a strip_prefix failure fell through to the absolute
+        // path, ingesting the file under a garbage rel_path that could
+        // never be looked up again. The fix makes this an explicit
+        // warn-and-skip.
+        let tmp_root = TempDir::new().unwrap();
+        let tmp_other = TempDir::new().unwrap();
+        let outside = tmp_other.path().join("outside.ts");
+        fs::write(&outside, "export const x = 1;\n").unwrap();
+
+        let conn = open_test_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let pool = ParserPool::new();
+        let mut indexed: Vec<IndexedFile> = Vec::new();
+
+        let result = try_reingest_changed_file(
+            &tx,
+            &outside,
+            tmp_root.path(),
+            "workspace1",
+            max_file_bytes(),
+            &pool,
+            &mut indexed,
+        )
+        .unwrap();
+
+        assert!(
+            !result,
+            "out-of-root file must report skip instead of ingesting under a garbage rel_path"
+        );
+        assert!(
+            indexed.is_empty(),
+            "no IndexedFile entry must be produced for an out-of-root path"
+        );
     }
 
     #[test]
