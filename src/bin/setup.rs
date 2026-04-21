@@ -923,12 +923,16 @@ fn install_claude_one(
         settings["hooks"] = serde_json::json!({});
     }
 
-    // Use qartez-guard binary directly (no bash dependency)
-    let guard_bin_path = find_binary("qartez-guard").map(|p| p.to_string_lossy().into_owned());
+    // Use qartez-guard binary directly (no bash dependency).
+    // Hook commands are executed by a shell (Git Bash on Windows), so
+    // paths must survive shell escape-processing - see
+    // format_hook_command_path.
+    let guard_bin_path = find_binary("qartez-guard")
+        .map(|p| format_hook_command_path(&p.to_string_lossy(), cfg!(windows)));
 
     // Use qartez-setup --session-start for session start hook (no bash dependency)
     let setup_bin_path = find_binary("qartez-setup")
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| format_hook_command_path(&p.to_string_lossy(), cfg!(windows)))
         .unwrap_or_else(|| "qartez-setup".to_string());
     let session_cmd = format!("{setup_bin_path} --session-start");
 
@@ -964,11 +968,16 @@ fn install_claude_one(
         warn("qartez-guard binary not found; modification guard hook skipped");
     }
 
-    // SessionStart: auto-indexing
+    // SessionStart: auto-indexing. The search term must appear in
+    // the command so re-running setup refreshes instead of
+    // duplicating - `qartez-setup` is the stable substring shared
+    // by every variant we write (current binary form as well as the
+    // broken Windows paths from v0.8.4 that this upgrade is meant
+    // to replace).
     ensure_hook_entry_no_matcher(
         &mut settings,
         "SessionStart",
-        "qartez-session-start",
+        "qartez-setup",
         &session_cmd,
         5000,
     );
@@ -1013,6 +1022,35 @@ struct HookEntry<'a> {
     search_term: &'a str,
     command: &'a str,
     timeout: u64,
+}
+
+/// Format a binary path for use as an IDE hook `command` string.
+///
+/// Claude Code and Gemini execute hook commands through a shell. On
+/// Windows, Claude Code invokes hooks via Git Bash (`/usr/bin/bash`),
+/// which treats `\` as an escape character - a raw Windows path like
+/// `C:\Users\me\AppData\Local\Programs\qartez\bin\qartez-setup.exe`
+/// is collapsed to `C:Usersme...qartez-setup.exe` before bash tries
+/// to run it, producing a "command not found" error (see
+/// kuberstar/qartez-mcp#25).
+///
+/// Convert backslashes to forward slashes when the host writes
+/// Windows-style paths - Git Bash accepts forward slashes when
+/// invoking `.exe` files - and wrap the result in double quotes when
+/// the path contains whitespace so usernames with spaces survive
+/// shell word-splitting.
+fn format_hook_command_path(raw: &str, windows_paths: bool) -> String {
+    let normalized = if windows_paths {
+        raw.replace('\\', "/")
+    } else {
+        raw.to_string()
+    };
+
+    if normalized.contains(char::is_whitespace) {
+        format!("\"{normalized}\"")
+    } else {
+        normalized
+    }
 }
 
 fn ensure_hook_entry(settings: &mut serde_json::Value, hook_type: &str, entry: HookEntry<'_>) {
@@ -1188,12 +1226,15 @@ fn install_gemini_one(
         settings["hooks"] = serde_json::json!({});
     }
 
-    // Use qartez-guard binary directly (no bash dependency)
-    let guard_bin_path = find_binary("qartez-guard").map(|p| p.to_string_lossy().into_owned());
+    // Use qartez-guard binary directly (no bash dependency). Hook
+    // commands run through a shell, so paths must survive shell
+    // escape-processing - see format_hook_command_path.
+    let guard_bin_path = find_binary("qartez-guard")
+        .map(|p| format_hook_command_path(&p.to_string_lossy(), cfg!(windows)));
 
     // Use qartez-setup --session-start for session start hook (no bash dependency)
     let setup_bin_path = find_binary("qartez-setup")
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| format_hook_command_path(&p.to_string_lossy(), cfg!(windows)))
         .unwrap_or_else(|| "qartez-setup".to_string());
     let session_cmd = format!("{setup_bin_path} --session-start");
 
@@ -1229,11 +1270,12 @@ fn install_gemini_one(
         warn("qartez-guard binary not found; modification guard hook skipped");
     }
 
-    // SessionStart: auto-indexing
+    // SessionStart: auto-indexing. See install_claude_one for why
+    // `qartez-setup` is the chosen search term.
     ensure_hook_entry_no_matcher(
         &mut settings,
         "SessionStart",
-        "qartez-session-start",
+        "qartez-setup",
         &session_cmd,
         5000,
     );
@@ -3860,5 +3902,249 @@ mod tests {
         );
         assert!(settings["hooks"]["PreToolUse"].is_array());
         assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    // -- Hook path formatting (kuberstar/qartez-mcp#25) -------------------
+
+    #[test]
+    fn format_hook_command_path_converts_windows_backslashes_to_forward_slashes() {
+        let raw = r"C:\Users\me\AppData\Local\Programs\qartez\bin\qartez-setup.exe";
+        assert_eq!(
+            format_hook_command_path(raw, true),
+            "C:/Users/me/AppData/Local/Programs/qartez/bin/qartez-setup.exe"
+        );
+    }
+
+    #[test]
+    fn format_hook_command_path_quotes_windows_path_with_spaces() {
+        let raw = r"C:\Users\John Doe\AppData\Local\Programs\qartez\bin\qartez-setup.exe";
+        assert_eq!(
+            format_hook_command_path(raw, true),
+            r#""C:/Users/John Doe/AppData/Local/Programs/qartez/bin/qartez-setup.exe""#
+        );
+    }
+
+    #[test]
+    fn format_hook_command_path_leaves_unix_path_unchanged() {
+        let raw = "/home/me/.local/bin/qartez-setup";
+        assert_eq!(format_hook_command_path(raw, false), raw);
+    }
+
+    #[test]
+    fn format_hook_command_path_quotes_unix_path_with_spaces() {
+        let raw = "/home/john doe/.local/bin/qartez-setup";
+        assert_eq!(
+            format_hook_command_path(raw, false),
+            r#""/home/john doe/.local/bin/qartez-setup""#
+        );
+    }
+
+    #[test]
+    fn install_claude_one_is_idempotent_on_re_run() {
+        // Running install twice must produce the same hook topology -
+        // otherwise users re-running `qartez-setup` after an upgrade
+        // accumulate duplicate entries. This exercises the refresh
+        // path in ensure_hook_entry* (see kuberstar/qartez-mcp#25).
+        let _mu = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let local_bin = tmp.path().join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        fs::write(local_bin.join("qartez-setup"), "").unwrap();
+        fs::write(local_bin.join("qartez-guard"), "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                local_bin.join("qartez-setup"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            fs::set_permissions(
+                local_bin.join("qartez-guard"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let claude_dir = tmp.path().join(".claude");
+        install_claude_one(&claude_dir, "qartez-mcp", None).unwrap();
+        install_claude_one(&claude_dir, "qartez-mcp", None).unwrap();
+
+        let settings = read_json(&claude_dir.join("settings.json")).unwrap();
+        let session_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+        let pretool_entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(
+            session_entries.len(),
+            1,
+            "SessionStart hook duplicated on re-run: {session_entries:#?}"
+        );
+        assert_eq!(
+            pretool_entries.len(),
+            2,
+            "expected exactly 2 PreToolUse hooks (Glob|Grep and Edit|Write|MultiEdit): {pretool_entries:#?}"
+        );
+    }
+
+    #[test]
+    fn install_claude_one_refreshes_broken_v084_windows_paths() {
+        // Upgrade path for kuberstar/qartez-mcp#25: a v0.8.4 user on
+        // Windows has a settings.json with backslash paths that Git
+        // Bash cannot execute. Re-running `qartez-setup` must
+        // overwrite those entries in place (no duplicates, no raw
+        // backslashes left).
+        let _mu = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let local_bin = tmp.path().join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        fs::write(local_bin.join("qartez-setup"), "").unwrap();
+        fs::write(local_bin.join("qartez-guard"), "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                local_bin.join("qartez-setup"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            fs::set_permissions(
+                local_bin.join("qartez-guard"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        // Simulate the broken v0.8.4 settings.json that a Windows
+        // user would already have on disk.
+        let seeded = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": r"C:\Users\live-sound\AppData\Local\Programs\qartez\bin\qartez-setup.exe --session-start",
+                        "timeout": 5000,
+                    }]
+                }],
+                "PreToolUse": [
+                    {
+                        "matcher": "Glob|Grep",
+                        "hooks": [{
+                            "type": "command",
+                            "command": r"C:\Users\live-sound\AppData\Local\Programs\qartez\bin\qartez-guard.exe",
+                            "timeout": 3000,
+                        }]
+                    },
+                    {
+                        "matcher": "Edit|Write|MultiEdit",
+                        "hooks": [{
+                            "type": "command",
+                            "command": r"C:\Users\live-sound\AppData\Local\Programs\qartez\bin\qartez-guard.exe",
+                            "timeout": 3000,
+                        }]
+                    }
+                ]
+            }
+        });
+        fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&seeded).unwrap(),
+        )
+        .unwrap();
+
+        install_claude_one(&claude_dir, "qartez-mcp", None).unwrap();
+
+        let settings = read_json(&claude_dir.join("settings.json")).unwrap();
+        let session = settings["hooks"]["SessionStart"].as_array().unwrap();
+        let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(session.len(), 1, "SessionStart must not be duplicated");
+        assert_eq!(pretool.len(), 2, "PreToolUse must stay at two entries");
+        for hook_array in [session, pretool] {
+            for entry in hook_array {
+                for hook in entry["hooks"].as_array().unwrap() {
+                    let cmd = hook["command"].as_str().unwrap();
+                    assert!(
+                        !cmd.contains('\\'),
+                        "v0.8.4 backslash path must be replaced: {cmd}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn install_claude_one_writes_hook_commands_without_backslashes() {
+        // Regression for kuberstar/qartez-mcp#25: Claude Code on Windows
+        // invokes hooks through Git Bash, which strips backslashes from
+        // the command string. settings.json must contain forward-slash
+        // paths so the hook actually resolves.
+        let _mu = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", tmp.path());
+
+        let local_bin = tmp.path().join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let setup_name = if cfg!(windows) {
+            "qartez-setup.exe"
+        } else {
+            "qartez-setup"
+        };
+        let guard_name = if cfg!(windows) {
+            "qartez-guard.exe"
+        } else {
+            "qartez-guard"
+        };
+        fs::write(local_bin.join(setup_name), "").unwrap();
+        fs::write(local_bin.join(guard_name), "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                local_bin.join(setup_name),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            fs::set_permissions(
+                local_bin.join(guard_name),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let claude_dir = tmp.path().join(".claude");
+        install_claude_one(&claude_dir, "qartez-mcp", None).unwrap();
+
+        let settings = read_json(&claude_dir.join("settings.json")).unwrap();
+
+        let session_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !session_cmd.contains('\\'),
+            "SessionStart hook command must not contain backslashes: {session_cmd}"
+        );
+        assert!(
+            session_cmd.contains("qartez-setup"),
+            "SessionStart hook should reference qartez-setup: {session_cmd}"
+        );
+        assert!(session_cmd.ends_with("--session-start"));
+
+        for entry in settings["hooks"]["PreToolUse"].as_array().unwrap() {
+            for hook in entry["hooks"].as_array().unwrap() {
+                let cmd = hook["command"].as_str().unwrap();
+                assert!(
+                    !cmd.contains('\\'),
+                    "PreToolUse hook command must not contain backslashes: {cmd}"
+                );
+                assert!(
+                    cmd.contains("qartez-guard"),
+                    "PreToolUse hook should reference qartez-guard: {cmd}"
+                );
+            }
+        }
     }
 }

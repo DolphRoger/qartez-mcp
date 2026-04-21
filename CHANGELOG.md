@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.5] - 2026-04-21
+
+### Fixed
+
+- **Git Bash on Windows runs the hook binary instead of collapsing the path** - Claude Code invokes hooks through `/usr/bin/bash` on Windows, which interprets backslashes as escape characters, so a raw `C:\Users\me\AppData\Local\Programs\qartez\bin\qartez-setup.exe` collapsed to `C:Usersme...qartez-setup.exe` before bash tried to spawn it ("command not found"). A new `format_hook_command_path` helper converts backslashes to forward slashes on Windows (Git Bash accepts these for `.exe` invocation) and double-quotes any path containing whitespace so usernames like `John Doe` survive word-splitting. Applied to `install_claude_one` and `install_gemini_one`; `mcpServers` commands are spawned directly and were never affected. Fixes #25.
+- **SessionStart hook re-registration is idempotent** - `ensure_hook_entry_no_matcher` was still searching for the legacy substring `qartez-session-start` (which matched the old `bash ~/.claude/hooks/qartez-session-start.sh` form) instead of the current `qartez-setup --session-start` binary form. On every re-run of `qartez-setup` the refresh branch was skipped and a new SessionStart entry was appended, so v0.8.4 Windows users pulling the path fix above would otherwise have accumulated duplicate hooks - one with the broken backslash path, one with the fixed forward-slash path, and the broken one would still fire. Switched the search term to `qartez-setup`, which appears in every command string the binary-era installer has ever written, so the refresh path now rewrites the entry in place. Applied symmetrically in `install_claude_one` and `install_gemini_one`, covered by two new regression tests (`install_claude_one_is_idempotent_on_re_run` and `install_claude_one_refreshes_broken_v084_windows_paths`).
+
 ## [0.8.4] - 2026-04-21
 
 ### Fixed
