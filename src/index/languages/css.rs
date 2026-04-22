@@ -98,62 +98,71 @@ fn extract_selectors(
     source: &[u8],
     symbols: &mut Vec<ExtractedSymbol>,
 ) {
-    match selector_node.kind() {
-        "class_selector" => {
-            let name = extract_selector_name(selector_node, source, ".");
-            if !name.is_empty() {
-                symbols.push(ExtractedSymbol {
-                    name,
-                    kind: SymbolKind::Class,
-                    line_start: rule_node.start_position().row as u32 + 1,
-                    line_end: rule_node.end_position().row as u32 + 1,
-                    signature: extract_signature(rule_node, source),
-                    is_exported: true,
-                    parent_idx: None,
-                    unused_excluded: false,
-                    complexity: None,
-                    owner_type: None,
-                });
-            }
-        }
-        "id_selector" => {
-            let name = extract_selector_name(selector_node, source, "#");
-            if !name.is_empty() {
-                symbols.push(ExtractedSymbol {
-                    name,
-                    kind: SymbolKind::Variable,
-                    line_start: rule_node.start_position().row as u32 + 1,
-                    line_end: rule_node.end_position().row as u32 + 1,
-                    signature: extract_signature(rule_node, source),
-                    is_exported: true,
-                    parent_idx: None,
-                    unused_excluded: false,
-                    complexity: None,
-                    owner_type: None,
-                });
-            }
-        }
-        _ => {
-            // Recurse into compound selectors, descendant selectors, etc.
-            for child in children(selector_node) {
-                extract_selectors(child, rule_node, source, symbols);
-            }
-        }
+    // Every top-level selector (a direct named child of the `selectors`
+    // node) represents one rule target. Emit exactly ONE symbol per
+    // top-level selector, using the selector's full source text as the
+    // name so the clone detector doesn't see co-located class children as
+    // duplicates:
+    //
+    //   * `.foo`                   -> 1 symbol `.foo` (class)
+    //   * `#bar`                   -> 1 symbol `#bar` (id/variable)
+    //   * `.a.b`                   -> 1 symbol `.a.b` (stacked class)
+    //   * `.foo:hover`             -> 1 symbol `.foo:hover` (compound)
+    //   * `.foo .bar path`         -> 1 symbol `.foo .bar path` (descendant)
+    //   * `.foo > .bar`            -> 1 symbol `.foo > .bar` (child combinator)
+    //   * `.a, .b`                 -> 2 symbols (one per top-level selector
+    //                                  in the comma list)
+    //
+    // tree-sitter-css puts the `,` delimiter in a comma-selector list as
+    // an anonymous child of `selectors`; skipping unnamed nodes filters
+    // out punctuation without needing to enumerate kinds.
+    //
+    // The previous implementation recursed into descendant/compound nodes
+    // and emitted a separate class/id symbol for every nested selector,
+    // inflating the CSS symbol count (~2.4x on real projects) and feeding
+    // the structural clone detector groups of co-located "duplicates"
+    // that were all the same rule.
+    if !selector_node.is_named() {
+        return;
     }
+    let kind = match selector_node.kind() {
+        "id_selector" => SymbolKind::Variable,
+        _ => SymbolKind::Class,
+    };
+    let name = normalize_selector_text(&node_text(selector_node, source));
+    push_selector_symbol(name, kind, rule_node, source, symbols);
 }
 
-fn extract_selector_name(node: Node, source: &[u8], prefix: &str) -> String {
-    for child in children(node) {
-        if child.kind() == "class_name" || child.kind() == "id_name" {
-            return format!("{}{}", prefix, node_text(child, source));
-        }
+fn push_selector_symbol(
+    name: String,
+    kind: SymbolKind,
+    rule_node: Node,
+    source: &[u8],
+    symbols: &mut Vec<ExtractedSymbol>,
+) {
+    if name.is_empty() {
+        return;
     }
-    // Fallback: parse from full text
-    let full = node_text(node, source);
-    if full.starts_with(prefix) {
-        return full;
-    }
-    String::new()
+    symbols.push(ExtractedSymbol {
+        name,
+        kind,
+        line_start: rule_node.start_position().row as u32 + 1,
+        line_end: rule_node.end_position().row as u32 + 1,
+        signature: extract_signature(rule_node, source),
+        is_exported: true,
+        parent_idx: None,
+        unused_excluded: false,
+        complexity: None,
+        owner_type: None,
+    });
+}
+
+fn normalize_selector_text(raw: &str) -> String {
+    // Collapse tree-sitter-preserved whitespace (newlines, tabs, runs of
+    // spaces) into a single space so compound selectors read the same
+    // whether the author wrote them on one line or broke them across
+    // several.
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn extract_keyframes(node: Node, source: &[u8]) -> Option<ExtractedSymbol> {
@@ -395,5 +404,59 @@ mod tests {
 
         assert_eq!(result.imports.len(), 1);
         assert_eq!(result.imports[0].source, "base.css");
+    }
+
+    #[test]
+    fn test_descendant_selector_emits_one_symbol() {
+        // `.hero__atlas .hero__arcs path { ... }` targets the `path`
+        // element inside `.hero__arcs` inside `.hero__atlas`. That is ONE
+        // rule, so the extractor should emit ONE symbol, not one per
+        // nested class/tag.
+        let result = parse_css(".hero__atlas .hero__arcs path { fill: red; }");
+        assert_eq!(result.symbols.len(), 1, "descendant selector = one rule");
+        assert_eq!(result.symbols[0].name, ".hero__atlas .hero__arcs path");
+    }
+
+    #[test]
+    fn test_compound_selector_emits_one_symbol() {
+        // Same rule, written with pseudo-class (`:hover`), combinator
+        // (`>`), or stacked classes (`.a.b`) - still one rule, one
+        // symbol each.
+        let hover = parse_css(".btn:hover { opacity: 0.8; }");
+        assert_eq!(hover.symbols.len(), 1);
+        assert_eq!(hover.symbols[0].name, ".btn:hover");
+
+        let child = parse_css(".card > .title { font-size: 16px; }");
+        assert_eq!(child.symbols.len(), 1);
+        assert_eq!(child.symbols[0].name, ".card > .title");
+
+        let stacked = parse_css(".is-primary.is-disabled { opacity: 0.5; }");
+        assert_eq!(stacked.symbols.len(), 1);
+        assert_eq!(stacked.symbols[0].name, ".is-primary.is-disabled");
+    }
+
+    #[test]
+    fn test_selector_list_emits_one_symbol_per_entry() {
+        // Comma-separated selectors DO target distinct things - each entry
+        // gets its own symbol so callers can navigate to a specific
+        // class/id.
+        let result = parse_css(".a, .b, #c { display: none; }");
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(result.symbols.len(), 3);
+        assert!(names.contains(&".a"));
+        assert!(names.contains(&".b"));
+        assert!(names.contains(&"#c"));
+    }
+
+    #[test]
+    fn test_compound_selector_normalizes_whitespace() {
+        // Authors routinely wrap long selector lists across multiple
+        // lines. The emitted symbol name should collapse any whitespace
+        // (newlines, tabs, runs of spaces) into a single space so the
+        // symbol reads identically regardless of formatting.
+        let src = ".outer\n  .middle\n  .inner { color: red; }";
+        let result = parse_css(src);
+        assert_eq!(result.symbols.len(), 1);
+        assert_eq!(result.symbols[0].name, ".outer .middle .inner");
     }
 }

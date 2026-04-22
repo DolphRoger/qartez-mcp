@@ -191,7 +191,27 @@ fn build_tool_call(command: &Command) -> (String, serde_json::Value) {
             ("qartez_calls".into(), args)
         }
 
-        Command::Clones => ("qartez_clones".into(), json!({})),
+        Command::Clones {
+            min_lines,
+            limit,
+            offset,
+            include_tests,
+        } => {
+            let mut args = json!({});
+            if let Some(ml) = min_lines {
+                args["min_lines"] = json!(ml);
+            }
+            if let Some(l) = limit {
+                args["limit"] = json!(l);
+            }
+            if let Some(o) = offset {
+                args["offset"] = json!(o);
+            }
+            if *include_tests {
+                args["include_tests"] = json!(true);
+            }
+            ("qartez_clones".into(), args)
+        }
 
         Command::Boundaries => ("qartez_boundaries".into(), json!({})),
 
@@ -205,7 +225,39 @@ fn build_tool_call(command: &Command) -> (String, serde_json::Value) {
             ("qartez_trend".into(), args)
         }
 
-        Command::Security => ("qartez_security".into(), json!({})),
+        Command::Security {
+            severity,
+            category,
+            file,
+            include_tests,
+            limit,
+            offset,
+            config_path,
+        } => {
+            let mut args = json!({});
+            if let Some(s) = severity {
+                args["severity"] = json!(s);
+            }
+            if let Some(c) = category {
+                args["category"] = json!(c);
+            }
+            if let Some(f) = file {
+                args["file_path"] = json!(f);
+            }
+            if *include_tests {
+                args["include_tests"] = json!(true);
+            }
+            if let Some(l) = limit {
+                args["limit"] = json!(l);
+            }
+            if let Some(o) = offset {
+                args["offset"] = json!(o);
+            }
+            if let Some(cp) = config_path {
+                args["config_path"] = json!(cp);
+            }
+            ("qartez_security".into(), args)
+        }
 
         Command::Cochange { file } => ("qartez_cochange".into(), json!({ "file_path": file })),
 

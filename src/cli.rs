@@ -191,7 +191,22 @@ pub enum Command {
     },
 
     /// Duplicate code detection via AST hashing
-    Clones,
+    Clones {
+        /// Minimum number of source lines for a symbol to be considered
+        /// (default: 8). Lower values surface smaller near-duplicates.
+        #[arg(long)]
+        min_lines: Option<u32>,
+        /// Max number of clone groups to return (default: 20). Groups
+        /// are sorted by size (most duplicates first).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Page offset into the sorted group list (default: 0).
+        #[arg(long)]
+        offset: Option<u32>,
+        /// Include clones that live in test files (default: excluded).
+        #[arg(long)]
+        include_tests: bool,
+    },
 
     /// Architecture boundary rule violations
     Boundaries,
@@ -212,7 +227,30 @@ pub enum Command {
     },
 
     /// Security analysis
-    Security,
+    Security {
+        /// Minimum severity threshold: low (default), medium, high, critical.
+        #[arg(long)]
+        severity: Option<String>,
+        /// Filter by vulnerability category: secrets, injection, crypto,
+        /// unsafe, info-leak, review.
+        #[arg(long)]
+        category: Option<String>,
+        /// Scan only files whose path contains this substring.
+        #[arg(long)]
+        file: Option<String>,
+        /// Include test/spec files in the scan (default: excluded).
+        #[arg(long)]
+        include_tests: bool,
+        /// Max number of findings to return (default: 50). Sorted by risk.
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Skip the first N findings (for pagination).
+        #[arg(long)]
+        offset: Option<u32>,
+        /// Path to a custom rules TOML, relative to the project root.
+        #[arg(long)]
+        config_path: Option<String>,
+    },
 
     /// Files that historically change together
     Cochange {

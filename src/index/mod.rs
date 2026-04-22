@@ -210,7 +210,7 @@ fn ingest_parsed_file(
             line_end: s.line_end,
             signature: s.signature.clone(),
             is_exported: s.is_exported,
-            shape_hash: compute_shape_hash(source, s.line_start, s.line_end),
+            shape_hash: compute_shape_hash(source, s.line_start, s.line_end, s.kind.as_str()),
             unused_excluded: s.unused_excluded,
             parent_idx: s.parent_idx,
             complexity: s.complexity,
@@ -619,7 +619,14 @@ fn resolve_symbol_references(
     let mut type_by_name: HashMap<String, HashSet<i64>> = HashMap::new();
     // Secondary index: symbol_id -> owner_type, for same-impl-block lookups.
     let mut owner_by_id: HashMap<i64, String> = HashMap::new();
-    for (sym, _path) in &all_syms {
+    // file_id -> file stem (filename without extension). Used by the
+    // qualifier heuristic to disambiguate same-named types defined in
+    // different files: `cli::Cli::parse()` should resolve to `Cli` in
+    // `cli.rs`, not any of the `Cli` structs in `bin/benchmark.rs`,
+    // `bin/guard.rs`, or `bin/setup.rs`. The module segment of the
+    // scoped path (extractor-side) matches the file stem here.
+    let mut file_stem_by_id: HashMap<i64, String> = HashMap::new();
+    for (sym, path) in &all_syms {
         name_index.entry(sym.name.clone()).or_default().push((
             sym.id,
             sym.file_id,
@@ -638,6 +645,13 @@ fn resolve_symbol_references(
         if let Some(ref ot) = sym.owner_type {
             owner_by_id.insert(sym.id, ot.clone());
         }
+        file_stem_by_id.entry(sym.file_id).or_insert_with(|| {
+            std::path::Path::new(path.as_str())
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        });
     }
 
     let mut batch: Vec<(i64, i64, &'static str)> = Vec::new();
@@ -657,17 +671,28 @@ fn resolve_symbol_references(
             .unwrap_or(&empty_imports);
 
         for reference in &entry.references {
-            // Module-scope references (no enclosing symbol) are dropped in
-            // v1 because PageRank only ranks the `(from_symbol, to_symbol)`
-            // edges it can attribute. Wiring up a synthetic "module" node
-            // per file is a v2 idea.
-            let Some(from_idx) = reference.from_symbol_idx else {
-                dropped_no_enclosing += 1;
-                continue;
-            };
-            let Some(&from_id) = entry.symbol_ids.get(from_idx) else {
-                dropped_no_enclosing += 1;
-                continue;
+            // Module-scope references (no enclosing symbol) arise from
+            // proc-macro DSLs emitted at file scope, e.g. `tool_router! {
+            // QartezParams => qartez_handler, }`. Attribute them to the
+            // file's first indexed symbol so the target still receives a
+            // real `symbol_refs` row and is not flagged as unused. PageRank
+            // drift is bounded because these synthetic edges land on a
+            // symbol that already ranks high for the file.
+            let from_id = match reference.from_symbol_idx {
+                Some(idx) => match entry.symbol_ids.get(idx) {
+                    Some(&id) => id,
+                    None => {
+                        dropped_no_enclosing += 1;
+                        continue;
+                    }
+                },
+                None => match entry.symbol_ids.first() {
+                    Some(&id) => id,
+                    None => {
+                        dropped_no_enclosing += 1;
+                        continue;
+                    }
+                },
             };
 
             let raw_candidates = match name_index.get(&reference.name) {
@@ -701,9 +726,23 @@ fn resolve_symbol_references(
             let mut via_receiver = false;
 
             // Heuristic 1: Qualifier-based matching (from scoped_identifier).
-            // When the reference has a qualifier (e.g. `Foo::new()`, qualifier = "Foo"),
-            // strongly prefer candidates whose owner_type matches the qualifier.
-            // This resolves the common case where multiple types define `new()`.
+            // When the reference has a qualifier (e.g. `Foo::new()`,
+            // qualifier = "Foo"), strongly prefer candidates whose
+            // owner_type matches the qualifier. Two flavours of match,
+            // tried in order before falling back to the broader priorities:
+            //
+            //   * owner_type match (`Foo::new` -> impl Foo { fn new }).
+            //   * file-stem match (`cli::Cli` -> struct Cli in `cli.rs`).
+            //     This is what lets us pick one file's `Cli` out of several
+            //     same-named definitions spread across bin crates.
+            //
+            // Each match runs first in same-file, then imported-file, then
+            // unique-global scope, so a local hit always wins over a distant
+            // ambiguous one.
+            let qualifier_matches = |sid: &i64, fid: &i64, qual: &str| -> bool {
+                owner_by_id.get(sid).map(|o| o.as_str()) == Some(qual)
+                    || file_stem_by_id.get(fid).map(|s| s.as_str()) == Some(qual)
+            };
             if let Some(ref qual) = reference.qualifier {
                 // First try: qualifier match in same file.
                 picked = candidates
@@ -711,7 +750,7 @@ fn resolve_symbol_references(
                     .filter(|(sid, fid, _, _)| {
                         *fid == entry.file_id
                             && *sid != from_id
-                            && owner_by_id.get(sid).map(|o| o.as_str()) == Some(qual)
+                            && qualifier_matches(sid, fid, qual)
                     })
                     .map(|(sid, _, _, _)| *sid)
                     .collect();
@@ -720,8 +759,7 @@ fn resolve_symbol_references(
                     picked = candidates
                         .iter()
                         .filter(|(sid, fid, _, _)| {
-                            imported.contains(fid)
-                                && owner_by_id.get(sid).map(|o| o.as_str()) == Some(qual)
+                            imported.contains(fid) && qualifier_matches(sid, fid, qual)
                         })
                         .map(|(sid, _, _, _)| *sid)
                         .collect();
@@ -730,9 +768,7 @@ fn resolve_symbol_references(
                 if picked.is_empty() {
                     let global: Vec<i64> = candidates
                         .iter()
-                        .filter(|(sid, _, _, _)| {
-                            owner_by_id.get(sid).map(|o| o.as_str()) == Some(qual)
-                        })
+                        .filter(|(sid, fid, _, _)| qualifier_matches(sid, fid, qual))
                         .map(|(sid, _, _, _)| *sid)
                         .collect();
                     if global.len() == 1 {
@@ -806,12 +842,39 @@ fn resolve_symbol_references(
             }
 
             // Priority 6: unique global match. Ambiguous global names are
-            // dropped - with no import evidence and multiple candidates
-            // there is no principled way to pick, and keeping them all
-            // would bury the signal under noise on large projects.
+            // normally dropped - with no import evidence and multiple
+            // candidates there is no principled way to pick, and keeping
+            // them all would bury the signal under noise on large projects.
+            //
+            // Exception: bare-name method calls like `watcher.run()` arrive
+            // here with no qualifier and no receiver-type hint because the
+            // Rust extractor does not run local type inference. Dropping
+            // these as ambiguous produces FP "unused" flags on every impl
+            // method called only through an instance binding. Trade: accept
+            // a small inflation of the use graph (dead methods with the
+            // same name as a called one may pick up spurious inbound edges)
+            // in exchange for eliminating the "method looks unused" FP
+            // class. Candidates are narrowed to methods only before the
+            // fan-out, so a same-named free function in the pool never gets
+            // a phantom reference from what is syntactically a method call.
             if picked.is_empty() {
                 if candidates.len() == 1 {
                     picked.push(candidates[0].0);
+                } else if reference.kind == ReferenceKind::Call
+                    && reference.qualifier.is_none()
+                    && reference.receiver_type_hint.is_none()
+                {
+                    let method_candidates: Vec<i64> = candidates
+                        .iter()
+                        .filter(|(_, _, k, _)| k == "method")
+                        .map(|c| c.0)
+                        .collect();
+                    if !method_candidates.is_empty() {
+                        picked.extend(method_candidates);
+                    } else {
+                        dropped_ambiguous += 1;
+                        continue;
+                    }
                 } else {
                     dropped_ambiguous += 1;
                     continue;

@@ -247,10 +247,26 @@ fn detect_feature_envy(
     for (sym, path) in &methods_with_owner {
         let own_type = sym.owner_type.as_ref().unwrap();
 
-        let refs: Vec<i64> = conn
-            .prepare_cached("SELECT to_symbol_id FROM symbol_refs WHERE from_symbol_id = ?1")
+        // Only `call` refs count for envy, and we need the target signature so
+        // we can exclude associated-function calls like `Step::new(...)` —
+        // those construct the target type, they don't envy its instance
+        // methods. Real feature envy is calling many instance methods on an
+        // object of a foreign type.
+        let refs: Vec<(i64, String, Option<String>)> = conn
+            .prepare_cached(
+                "SELECT sr.to_symbol_id, sr.kind, s.signature \
+                 FROM symbol_refs sr \
+                 JOIN symbols s ON s.id = sr.to_symbol_id \
+                 WHERE sr.from_symbol_id = ?1",
+            )
             .and_then(|mut stmt| {
-                let rows = stmt.query_map([sym.id], |row| row.get(0))?;
+                let rows = stmt.query_map([sym.id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
                 rows.collect()
             })
             .map_err(|e| format!("DB error: {e}"))?;
@@ -263,7 +279,21 @@ fn detect_feature_envy(
         let mut external_by_type: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
 
-        for to_id in &refs {
+        for (to_id, ref_kind, target_sig) in &refs {
+            // Non-`call` refs (type references, use imports) aren't envy.
+            if ref_kind != "call" {
+                continue;
+            }
+            // Feature envy per Fowler requires calling instance methods on a
+            // foreign object. Associated-function calls (`Type::new(...)`,
+            // `Step::god(...)`) are constructors/factories, not envy. Fail
+            // closed: when the target signature is missing (cross-file
+            // macro-generated target, trait impl without visible signature),
+            // skip it rather than assume envy.
+            let has_self = target_sig.as_deref().is_some_and(signature_has_self);
+            if !has_self {
+                continue;
+            }
             match owner_lookup.get(to_id) {
                 Some(target_type) if target_type == own_type => {
                     own_calls += 1;
@@ -301,6 +331,36 @@ fn detect_feature_envy(
             .reverse()
     });
     Ok(out)
+}
+
+/// Returns true if the signature's first parameter is a `self` receiver
+/// (`self`, `mut self`, `&self`, `&mut self`, or a lifetime-qualified
+/// reference like `&'a self`). A missing or non-self first parameter means
+/// this is an associated function (constructor/factory), not an instance
+/// method — so it should not count toward feature envy.
+fn signature_has_self(sig: &str) -> bool {
+    let Some(open) = sig.find('(') else {
+        return false;
+    };
+    let rest = &sig[open + 1..];
+    let first_end = rest.find([',', ')']).unwrap_or(rest.len());
+    let first = rest[..first_end].trim();
+    // Peel off the type annotation to handle arbitrary-self-types like
+    // `self: Box<Self>`, `self: Pin<&mut Self>`, `self: Rc<Self>` (RFC
+    // 3324). The receiver token is whatever sits before the first `:`,
+    // which must match one of the classical self-receiver forms.
+    let head = first
+        .split_once(':')
+        .map(|(h, _)| h.trim())
+        .unwrap_or(first);
+    if matches!(head, "self" | "mut self" | "&self" | "&mut self") {
+        return true;
+    }
+    // Lifetime-qualified receivers: `&'a self`, `&'a mut self`, etc.
+    if head.starts_with('&') && head.contains("self") {
+        return true;
+    }
+    false
 }
 
 fn format_god_functions(
@@ -481,7 +541,7 @@ pub(super) fn count_signature_params(sig: &str) -> usize {
 }
 #[cfg(test)]
 mod param_count_tests {
-    use super::count_signature_params;
+    use super::{count_signature_params, signature_has_self};
 
     #[test]
     fn empty_params() {
@@ -540,5 +600,46 @@ mod param_count_tests {
             count_signature_params("fn foo(f: fn(i32) -> bool, x: i32)"),
             2,
         );
+    }
+
+    #[test]
+    fn signature_has_self_classical_receivers() {
+        for sig in &[
+            "fn a(self)",
+            "fn a(mut self)",
+            "fn a(&self)",
+            "fn a(&mut self)",
+            "fn a(&self, x: i32)",
+            "fn a(&'a self)",
+            "fn a(&'a mut self)",
+        ] {
+            assert!(signature_has_self(sig), "must accept {sig}");
+        }
+    }
+
+    #[test]
+    fn signature_has_self_arbitrary_self_types() {
+        for sig in &[
+            "fn a(self: Box<Self>)",
+            "fn a(self: Rc<Self>)",
+            "fn a(self: Arc<Self>)",
+            "fn a(self: Pin<&mut Self>, x: i32)",
+            "async fn a(self: Pin<&Self>)",
+            "fn a(mut self: Box<Self>)",
+        ] {
+            assert!(signature_has_self(sig), "must accept {sig}");
+        }
+    }
+
+    #[test]
+    fn signature_has_self_rejects_associated_fn() {
+        for sig in &[
+            "fn new(name: &str) -> Self",
+            "fn factory(input: u32) -> Self",
+            "fn no_args()",
+            "fn with_colon(cls: Foo, x: i32)",
+        ] {
+            assert!(!signature_has_self(sig), "must reject {sig}");
+        }
     }
 }

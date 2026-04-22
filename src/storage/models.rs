@@ -41,19 +41,6 @@ pub struct SymbolRow {
     pub owner_type: Option<String>,
 }
 
-/// Row in the `symbol_refs` table: one edge in the call / type / use graph
-/// between two symbols. Populated by the resolution pass in `full_index`
-/// after all symbols have been written.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct SymbolRefRow {
-    pub id: i64,
-    pub from_symbol_id: i64,
-    pub to_symbol_id: i64,
-    /// Either "call", "use", or "type" - matches `ReferenceKind::as_str`.
-    pub kind: String,
-}
-
 #[derive(Default)]
 pub struct SymbolInsert {
     pub name: String,

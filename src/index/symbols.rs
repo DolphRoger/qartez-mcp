@@ -233,9 +233,21 @@ pub struct ParseResult {
 /// but different names/values produce the same hash (Type-I and Type-II clones
 /// in the clone-detection taxonomy).
 ///
+/// For data declarations (`const`, `variable`), the identity of the symbol
+/// lives in the initializer literal itself: `const CREATE_X: &str = "SQL..."`.
+/// Collapsing those literals would make every `const NAME: &str = "..."` hash
+/// the same, so for data-declaration kinds we preserve the literal body and
+/// only strip comments + whitespace. Follows PMD/jscpd's default of keeping
+/// literal content in the token stream.
+///
 /// Returns `None` for symbols shorter than `SHAPE_HASH_MIN_LINES` or whose
 /// normalized form is too short to be meaningful.
-pub fn compute_shape_hash(source: &[u8], line_start: u32, line_end: u32) -> Option<String> {
+pub fn compute_shape_hash(
+    source: &[u8],
+    line_start: u32,
+    line_end: u32,
+    kind: &str,
+) -> Option<String> {
     let body_lines = line_end.saturating_sub(line_start) + 1;
     if body_lines < SHAPE_HASH_MIN_LINES {
         return None;
@@ -251,7 +263,11 @@ pub fn compute_shape_hash(source: &[u8], line_start: u32, line_end: u32) -> Opti
     }
 
     let snippet = source_lines[start..end].join("\n");
-    let normalized = normalize_source(&snippet);
+    let normalized = if is_data_decl_kind(kind) {
+        normalize_source_preserve_literals(&snippet)
+    } else {
+        normalize_source(&snippet)
+    };
 
     if normalized.len() < SHAPE_HASH_MIN_NORMALIZED_BYTES {
         return None;
@@ -260,6 +276,53 @@ pub fn compute_shape_hash(source: &[u8], line_start: u32, line_end: u32) -> Opti
     let mut hasher = std::hash::DefaultHasher::new();
     normalized.hash(&mut hasher);
     Some(format!("{:016x}", hasher.finish()))
+}
+
+fn is_data_decl_kind(kind: &str) -> bool {
+    // Declarative kinds whose identity lives in key-value literals, not in
+    // control-flow structure. Examples:
+    //   const CREATE_X: &str = "CREATE TABLE ..."  (Rust const)
+    //   resource "aws_instance" "web" { ami = "..." }  (Terraform)
+    //   services: web: { image: "nginx", ports: ... }  (docker-compose)
+    // Collapsing string literals to `_S` on these kinds makes semantically
+    // unrelated declarations hash identically.
+    matches!(
+        kind,
+        "const"
+            | "variable"
+            | "local"
+            | "data"
+            | "resource"
+            | "output"
+            | "module"
+            | "provider"
+            | "service"
+            | "network"
+            | "volume"
+            | "task"
+            | "job"
+            | "workflow"
+            | "stage"
+            | "target"
+    )
+}
+
+/// Normalize a data declaration (`const`, top-level `let`/`var`) by stripping
+/// only comments and collapsing whitespace. Keeps identifiers and literals so
+/// that `const A: &str = "x"` and `const B: &str = "y"` hash differently.
+fn normalize_source_preserve_literals(src: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE_BLOCK_COMMENT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"/\*[\s\S]*?\*/").unwrap());
+    static RE_LINE_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//[^\n]*").unwrap());
+    static RE_WS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+
+    let s = RE_BLOCK_COMMENT.replace_all(src, "");
+    let s = RE_LINE_COMMENT.replace_all(&s, "");
+    let s = RE_WS.replace_all(&s, " ");
+    s.trim().to_string()
 }
 
 /// Normalize source text into a structural skeleton suitable for hashing.
@@ -300,8 +363,8 @@ mod tests {
     fn identical_structure_same_hash() {
         let src_a = b"fn foo(x: i32) -> i32 {\n    if x > 0 {\n        return x + 1;\n    }\n    x - 1\n}\n";
         let src_b = b"fn bar(y: i32) -> i32 {\n    if y > 0 {\n        return y + 1;\n    }\n    y - 1\n}\n";
-        let hash_a = compute_shape_hash(src_a, 1, 6).unwrap();
-        let hash_b = compute_shape_hash(src_b, 1, 6).unwrap();
+        let hash_a = compute_shape_hash(src_a, 1, 6, "function").unwrap();
+        let hash_b = compute_shape_hash(src_b, 1, 6, "function").unwrap();
         assert_eq!(hash_a, hash_b);
     }
 
@@ -309,23 +372,23 @@ mod tests {
     fn different_structure_different_hash() {
         let src_a = b"fn foo(x: i32) -> i32 {\n    if x > 0 {\n        return x + 1;\n    }\n    x - 1\n}\n";
         let src_b = b"fn bar(items: Vec<i32>) -> i32 {\n    let mut sum = 0;\n    for item in items {\n        sum += item;\n    }\n    sum\n}\n";
-        let hash_a = compute_shape_hash(src_a, 1, 6).unwrap();
-        let hash_b = compute_shape_hash(src_b, 1, 7).unwrap();
+        let hash_a = compute_shape_hash(src_a, 1, 6, "function").unwrap();
+        let hash_b = compute_shape_hash(src_b, 1, 7, "function").unwrap();
         assert_ne!(hash_a, hash_b);
     }
 
     #[test]
     fn too_short_returns_none() {
         let src = b"fn f() { }\n";
-        assert!(compute_shape_hash(src, 1, 1).is_none());
+        assert!(compute_shape_hash(src, 1, 1, "function").is_none());
     }
 
     #[test]
     fn different_literals_same_hash() {
         let src_a = b"fn a() {\n    let x = \"hello\";\n    let y = 42;\n    println(x, y);\n}\n";
         let src_b = b"fn b() {\n    let x = \"world\";\n    let y = 99;\n    println(x, y);\n}\n";
-        let hash_a = compute_shape_hash(src_a, 1, 5).unwrap();
-        let hash_b = compute_shape_hash(src_b, 1, 5).unwrap();
+        let hash_a = compute_shape_hash(src_a, 1, 5, "function").unwrap();
+        let hash_b = compute_shape_hash(src_b, 1, 5, "function").unwrap();
         assert_eq!(hash_a, hash_b);
     }
 
@@ -333,8 +396,31 @@ mod tests {
     fn comments_ignored() {
         let src_a = b"fn a() {\n    // do the thing\n    let x = 1;\n    x + 1\n}\n";
         let src_b = b"fn b() {\n    // something else entirely\n    let y = 2;\n    y + 2\n}\n";
-        let hash_a = compute_shape_hash(src_a, 1, 5).unwrap();
-        let hash_b = compute_shape_hash(src_b, 1, 5).unwrap();
+        let hash_a = compute_shape_hash(src_a, 1, 5, "function").unwrap();
+        let hash_b = compute_shape_hash(src_b, 1, 5, "function").unwrap();
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn const_different_literals_different_hash() {
+        let src_a = b"const A: &str = \"\nCREATE TABLE a (\n    id INT\n)\";\n";
+        let src_b = b"const B: &str = \"\nCREATE TABLE b (\n    name TEXT\n)\";\n";
+        let h_a = compute_shape_hash(src_a, 1, 4, "const").unwrap();
+        let h_b = compute_shape_hash(src_b, 1, 4, "const").unwrap();
+        assert_ne!(
+            h_a, h_b,
+            "const declarations with different literal bodies must hash differently"
+        );
+    }
+
+    #[test]
+    fn const_identical_bodies_same_hash() {
+        let src_a =
+            b"pub const QUERY: &str = \"\nSELECT *\nFROM events\nWHERE ts > ?\nORDER BY ts\";\n";
+        let src_b =
+            b"pub const QUERY: &str = \"\nSELECT *\nFROM events\nWHERE ts > ?\nORDER BY ts\";\n";
+        let h_a = compute_shape_hash(src_a, 1, 6, "const").unwrap();
+        let h_b = compute_shape_hash(src_b, 1, 6, "const").unwrap();
+        assert_eq!(h_a, h_b, "genuine copy-paste consts must still cluster");
     }
 }

@@ -3988,6 +3988,7 @@ fn qartez_clones_finds_duplicates() {
             limit: Some(10),
             offset: None,
             min_lines: Some(5),
+            include_tests: None,
             format: Some(Format::Detailed),
         }))
         .unwrap();
@@ -4012,6 +4013,7 @@ fn qartez_clones_concise_smaller() {
             limit: Some(10),
             offset: None,
             min_lines: Some(5),
+            include_tests: None,
             format: Some(Format::Detailed),
         }))
         .unwrap();
@@ -4020,6 +4022,7 @@ fn qartez_clones_concise_smaller() {
             limit: Some(10),
             offset: None,
             min_lines: Some(5),
+            include_tests: None,
             format: Some(Format::Concise),
         }))
         .unwrap();
@@ -4042,6 +4045,7 @@ fn qartez_clones_no_clones_message() {
             limit: Some(10),
             offset: None,
             min_lines: Some(5),
+            include_tests: None,
             format: None,
         }))
         .unwrap();
@@ -4059,12 +4063,598 @@ fn qartez_clones_pagination() {
             limit: Some(1),
             offset: Some(0),
             min_lines: Some(5),
+            include_tests: None,
             format: None,
         }))
         .unwrap();
     assert!(
         page1.contains("clone group") || page1.contains("1 clone group"),
         "first page should contain results"
+    );
+}
+
+#[test]
+fn qartez_clones_ignores_same_range_multi_indexed_symbols() {
+    // Regression: CSS comma-selector lists (`.a, .b, .c { ... }`) emit one
+    // symbol per top-level selector entry. All entries land at the same
+    // `(file_id, line_start, line_end)` and share one shape_hash, so the
+    // naive COUNT(*) grouping reported them as a clone group of N
+    // "duplicates" that were all one rule. The dedup-by-range SQL must
+    // suppress such groups.
+    //
+    // Fixture: file `styles.css` with 9 symbols at the same line range
+    // sharing one shape_hash - exactly the shape of a 9-selector comma
+    // list - plus a real duplicate pair in two distinct files to prove
+    // the genuine-duplicate path still fires.
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("styles.css"), "").unwrap();
+    fs::write(src.join("a.rs"), "").unwrap();
+    fs::write(src.join("b.rs"), "").unwrap();
+
+    let conn = setup_db();
+
+    let f_css = write::upsert_file(&conn, "src/styles.css", 1000, 100, "css", 20).unwrap();
+    let f_a = write::upsert_file(&conn, "src/a.rs", 1000, 100, "rust", 10).unwrap();
+    let f_b = write::upsert_file(&conn, "src/b.rs", 1000, 100, "rust", 10).unwrap();
+
+    // 9 "selectors" at the same line range, same shape hash - must NOT
+    // surface as a clone group.
+    let css_hash = "css_comma_list_hash";
+    for i in 0..9 {
+        write::insert_symbols(
+            &conn,
+            f_css,
+            &[SymbolInsert {
+                name: format!(".sel_{i}"),
+                kind: "class".into(),
+                line_start: 10,
+                line_end: 20,
+                signature: None,
+                is_exported: true,
+                shape_hash: Some(css_hash.into()),
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+                owner_type: None,
+            }],
+        )
+        .unwrap();
+    }
+
+    // Two real duplicates in DIFFERENT files at distinct ranges - must
+    // still surface.
+    let real_hash = "real_duplicate_hash";
+    write::insert_symbols(
+        &conn,
+        f_a,
+        &[SymbolInsert {
+            name: "real_fn_a".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 12,
+            signature: None,
+            is_exported: true,
+            shape_hash: Some(real_hash.into()),
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: None,
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+    write::insert_symbols(
+        &conn,
+        f_b,
+        &[SymbolInsert {
+            name: "real_fn_b".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 12,
+            signature: None,
+            is_exported: true,
+            shape_hash: Some(real_hash.into()),
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: None,
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+
+    let out = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(5),
+            include_tests: None,
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+
+    // The 9-member CSS comma-list must NOT surface. None of `.sel_0`..
+    // `.sel_8` should appear in any clone group.
+    for i in 0..9 {
+        let sel = format!(".sel_{i}");
+        assert!(
+            !out.contains(&sel),
+            "CSS comma-selector symbol {sel} must not appear as a clone: {out}"
+        );
+    }
+
+    // The real cross-file duplicate pair MUST surface.
+    assert!(
+        out.contains("real_fn_a") && out.contains("real_fn_b"),
+        "real duplicate pair must still surface: {out}"
+    );
+
+    // And the single real clone group should be the ONLY group.
+    assert!(
+        out.contains("1 clone group"),
+        "only the real duplicate group should remain, got: {out}"
+    );
+}
+
+#[test]
+fn qartez_clones_mixed_same_range_plus_distinct_duplicates() {
+    // Edge case for the dedup rule: one shape_hash backs BOTH
+    //   * a 5-member CSS comma list (all at the same physical span), AND
+    //   * 3 legitimate duplicates at distinct physical spans.
+    // The group must surface with exactly 3 members (the distinct ones);
+    // the 5 co-located CSS selectors must be collapsed to one
+    // representative - not drop the group, not inflate it to 8.
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("styles.css"), "").unwrap();
+    fs::write(src.join("a.rs"), "").unwrap();
+    fs::write(src.join("b.rs"), "").unwrap();
+    fs::write(src.join("c.rs"), "").unwrap();
+
+    let conn = setup_db();
+
+    let f_css = write::upsert_file(&conn, "src/styles.css", 1000, 100, "css", 20).unwrap();
+    let f_a = write::upsert_file(&conn, "src/a.rs", 1000, 100, "rust", 10).unwrap();
+    let f_b = write::upsert_file(&conn, "src/b.rs", 1000, 100, "rust", 10).unwrap();
+    let f_c = write::upsert_file(&conn, "src/c.rs", 1000, 100, "rust", 10).unwrap();
+
+    // Single shape_hash shared across co-located CSS + 3 distinct rust
+    // clones. Physical spans:
+    //   styles.css L10-20  (5 symbols, SAME range, MUST collapse)
+    //   a.rs       L1-12
+    //   b.rs       L1-12
+    //   c.rs       L1-12
+    let shared_hash = "mixed_shape";
+
+    for i in 0..5 {
+        write::insert_symbols(
+            &conn,
+            f_css,
+            &[SymbolInsert {
+                name: format!(".css_sel_{i}"),
+                kind: "class".into(),
+                line_start: 10,
+                line_end: 20,
+                signature: None,
+                is_exported: true,
+                shape_hash: Some(shared_hash.into()),
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+                owner_type: None,
+            }],
+        )
+        .unwrap();
+    }
+    for (file_id, name) in &[(f_a, "dup_a"), (f_b, "dup_b"), (f_c, "dup_c")] {
+        write::insert_symbols(
+            &conn,
+            *file_id,
+            &[SymbolInsert {
+                name: (*name).into(),
+                kind: "function".into(),
+                line_start: 1,
+                line_end: 12,
+                signature: None,
+                is_exported: true,
+                shape_hash: Some(shared_hash.into()),
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+                owner_type: None,
+            }],
+        )
+        .unwrap();
+    }
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+
+    let out = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(5),
+            include_tests: None,
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+
+    // Exactly one clone group surfaces.
+    assert!(
+        out.contains("1 clone group"),
+        "exactly one group should remain, got: {out}"
+    );
+
+    // Members list contains the 3 distinct-range entries.
+    assert!(out.contains("dup_a"), "dup_a missing: {out}");
+    assert!(out.contains("dup_b"), "dup_b missing: {out}");
+    assert!(out.contains("dup_c"), "dup_c missing: {out}");
+
+    // The 5 co-located CSS entries must be represented by at most ONE
+    // member in the rendered output (the stable representative picked
+    // by ORDER BY f.path, s.line_start = the first `.css_sel_*`). The
+    // other 4 must NOT appear.
+    let css_hits = out.matches(".css_sel_").count();
+    assert!(
+        css_hits <= 1,
+        "co-located CSS selectors must collapse to <=1 representative, got {css_hits} in:\n{out}"
+    );
+
+    // Group size header must say "4 duplicates" (1 CSS representative +
+    // 3 distinct rust clones), NOT 8.
+    assert!(
+        out.contains("4 duplicates"),
+        "group size must collapse co-located duplicates to single representative, got:\n{out}"
+    );
+}
+
+#[test]
+fn qartez_clones_representative_picked_stably() {
+    // The HashSet-based dedup keeps "the first seen" per physical span;
+    // SQL's `ORDER BY f.path, s.line_start` makes that choice stable.
+    // Run the tool twice and assert the displayed representative for a
+    // co-located group is byte-identical across runs - otherwise report
+    // output is nondeterministic and CI snapshot tests would churn.
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("x.css"), "").unwrap();
+    fs::write(src.join("a.rs"), "").unwrap();
+    fs::write(src.join("b.rs"), "").unwrap();
+
+    let conn = setup_db();
+    let f_css = write::upsert_file(&conn, "src/x.css", 1000, 100, "css", 20).unwrap();
+    let f_a = write::upsert_file(&conn, "src/a.rs", 1000, 100, "rust", 10).unwrap();
+    let f_b = write::upsert_file(&conn, "src/b.rs", 1000, 100, "rust", 10).unwrap();
+
+    let shared_hash = "stable_repr";
+
+    // 4 co-located CSS selectors, inserted in a non-alphabetical order
+    // so any ordering dependency in the dedup visible in the output.
+    for name in &[".zzz", ".bbb", ".mmm", ".aaa"] {
+        write::insert_symbols(
+            &conn,
+            f_css,
+            &[SymbolInsert {
+                name: (*name).into(),
+                kind: "class".into(),
+                line_start: 5,
+                line_end: 15,
+                signature: None,
+                is_exported: true,
+                shape_hash: Some(shared_hash.into()),
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+                owner_type: None,
+            }],
+        )
+        .unwrap();
+    }
+    // One real cross-file duplicate so the group qualifies.
+    for fid in &[f_a, f_b] {
+        write::insert_symbols(
+            &conn,
+            *fid,
+            &[SymbolInsert {
+                name: "dup_fn".into(),
+                kind: "function".into(),
+                line_start: 1,
+                line_end: 12,
+                signature: None,
+                is_exported: true,
+                shape_hash: Some(shared_hash.into()),
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+                owner_type: None,
+            }],
+        )
+        .unwrap();
+    }
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+
+    let first = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(5),
+            include_tests: None,
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+    let second = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(5),
+            include_tests: None,
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+
+    assert_eq!(
+        first, second,
+        "clone report must be deterministic across identical calls"
+    );
+
+    // Exactly one co-located CSS representative must appear.
+    let css_names = [".zzz", ".bbb", ".mmm", ".aaa"];
+    let appearing: Vec<&&str> = css_names.iter().filter(|n| first.contains(**n)).collect();
+    assert_eq!(
+        appearing.len(),
+        1,
+        "exactly one CSS selector must represent the co-located group, got {appearing:?}"
+    );
+}
+
+#[test]
+fn qartez_clones_excludes_cfg_test_modules_by_default() {
+    // A single Rust source file holds TWO structurally-identical helpers:
+    // one in production scope and one inside `#[cfg(test)] mod tests`.
+    // Plus one production-code clone in a second file so the group has
+    // more than one distinct physical span. By default the cfg(test)
+    // member must be filtered out and ONLY the two production clones
+    // surface. Passing `include_tests=true` must restore the test
+    // member.
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    let with_cfg_test = r#"pub fn prod_one(x: i32) -> i32 {
+    let y = x + 1;
+    let z = y * 2;
+    if z > 10 { z } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_fixture(x: i32) -> i32 {
+        let y = x + 1;
+        let z = y * 2;
+        if z > 10 { z } else { 0 }
+    }
+}
+"#;
+    let pure_prod = r#"pub fn prod_two(val: i32) -> i32 {
+    let a = val + 1;
+    let b = a * 2;
+    if b > 10 { b } else { 0 }
+}
+"#;
+    fs::write(src.join("a.rs"), with_cfg_test).unwrap();
+    fs::write(src.join("b.rs"), pure_prod).unwrap();
+
+    let conn = setup_db();
+
+    let f_a = write::upsert_file(
+        &conn,
+        "src/a.rs",
+        1000,
+        with_cfg_test.len() as i64,
+        "rust",
+        with_cfg_test.lines().count() as i64,
+    )
+    .unwrap();
+    let f_b = write::upsert_file(
+        &conn,
+        "src/b.rs",
+        1000,
+        pure_prod.len() as i64,
+        "rust",
+        pure_prod.lines().count() as i64,
+    )
+    .unwrap();
+
+    let shared_hash = "cfg_test_shape";
+    // prod_one: lines 1-5 (outside cfg(test))
+    write::insert_symbols(
+        &conn,
+        f_a,
+        &[SymbolInsert {
+            name: "prod_one".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 5,
+            signature: None,
+            is_exported: true,
+            shape_hash: Some(shared_hash.into()),
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: None,
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+    // test_fixture: lines 9-13 (inside `#[cfg(test)] mod tests {}`)
+    write::insert_symbols(
+        &conn,
+        f_a,
+        &[SymbolInsert {
+            name: "test_fixture".into(),
+            kind: "function".into(),
+            line_start: 9,
+            line_end: 13,
+            signature: None,
+            is_exported: false,
+            shape_hash: Some(shared_hash.into()),
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: None,
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+    // prod_two: lines 1-5 in src/b.rs
+    write::insert_symbols(
+        &conn,
+        f_b,
+        &[SymbolInsert {
+            name: "prod_two".into(),
+            kind: "function".into(),
+            line_start: 1,
+            line_end: 5,
+            signature: None,
+            is_exported: true,
+            shape_hash: Some(shared_hash.into()),
+            parent_idx: None,
+            unused_excluded: false,
+            complexity: None,
+            owner_type: None,
+        }],
+    )
+    .unwrap();
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+
+    // Default: include_tests=None => the cfg(test) fixture must be
+    // filtered out, only the two prod clones survive.
+    let out_default = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(4),
+            include_tests: None,
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+    assert!(
+        out_default.contains("prod_one") && out_default.contains("prod_two"),
+        "production clones must surface: {out_default}"
+    );
+    assert!(
+        !out_default.contains("test_fixture"),
+        "cfg(test) member must be filtered by default: {out_default}"
+    );
+
+    // include_tests=true: the cfg(test) fixture must reappear.
+    let out_with_tests = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(4),
+            include_tests: Some(true),
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+    assert!(
+        out_with_tests.contains("test_fixture"),
+        "include_tests=true must surface cfg(test) duplicates: {out_with_tests}"
+    );
+    assert!(
+        out_with_tests.contains("prod_one") && out_with_tests.contains("prod_two"),
+        "production clones must still surface with include_tests=true: {out_with_tests}"
+    );
+}
+
+#[test]
+fn qartez_clones_excludes_test_path_files_by_default() {
+    // Clone group with one member in a conventional test path
+    // (`tests/something.rs`) and two in production code. By default the
+    // `tests/` member must be dropped; with `include_tests=true` it
+    // must reappear.
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let src = dir.path().join("src");
+    let tests = dir.path().join("tests");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&tests).unwrap();
+    fs::write(src.join("a.rs"), "").unwrap();
+    fs::write(src.join("b.rs"), "").unwrap();
+    fs::write(tests.join("integration.rs"), "").unwrap();
+
+    let conn = setup_db();
+    let f_a = write::upsert_file(&conn, "src/a.rs", 1000, 200, "rust", 20).unwrap();
+    let f_b = write::upsert_file(&conn, "src/b.rs", 1000, 200, "rust", 20).unwrap();
+    let f_t = write::upsert_file(&conn, "tests/integration.rs", 1000, 200, "rust", 20).unwrap();
+
+    let shared_hash = "test_path_shape";
+    for (fid, name) in &[(f_a, "prod_a"), (f_b, "prod_b"), (f_t, "integration_fn")] {
+        write::insert_symbols(
+            &conn,
+            *fid,
+            &[SymbolInsert {
+                name: (*name).into(),
+                kind: "function".into(),
+                line_start: 1,
+                line_end: 10,
+                signature: None,
+                is_exported: true,
+                shape_hash: Some(shared_hash.into()),
+                parent_idx: None,
+                unused_excluded: false,
+                complexity: None,
+                owner_type: None,
+            }],
+        )
+        .unwrap();
+    }
+
+    pagerank::compute_pagerank(&conn, &PageRankConfig::default()).unwrap();
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+
+    let out_default = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(5),
+            include_tests: None,
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+    assert!(
+        out_default.contains("prod_a") && out_default.contains("prod_b"),
+        "production duplicates must surface: {out_default}"
+    );
+    assert!(
+        !out_default.contains("integration_fn"),
+        "test-path clone member must be filtered by default: {out_default}"
+    );
+
+    let out_with_tests = server
+        .qartez_clones(Parameters(SoulClonesParams {
+            limit: Some(50),
+            offset: None,
+            min_lines: Some(5),
+            include_tests: Some(true),
+            format: Some(Format::Detailed),
+        }))
+        .unwrap();
+    assert!(
+        out_with_tests.contains("integration_fn"),
+        "include_tests=true must surface test-path duplicates: {out_with_tests}"
     );
 }
 

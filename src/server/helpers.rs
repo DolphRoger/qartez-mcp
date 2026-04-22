@@ -324,49 +324,7 @@ pub(super) fn compute_cochange_pairs(
 /// excluded from blast radius and aggregate counts by default). Covers common
 /// conventions across Rust, Go, TypeScript/JavaScript, Python, Java, and Ruby.
 pub(super) fn is_test_path(path: &str) -> bool {
-    const TEST_DIR_PREFIXES: &[&str] = &["tests/", "test/", "benches/", "__tests__/", "spec/"];
-    const TEST_DIR_SUBSTRINGS: &[&str] =
-        &["/tests/", "/test/", "/benches/", "/__tests__/", "/spec/"];
-    const TEST_FILE_EXACT: &[&str] = &["test.rs", "tests.rs"];
-    const TEST_FILE_SUFFIXES: &[&str] = &[
-        "_test.rs",
-        "_tests.rs",
-        "_test.go",
-        "_test.dart",
-        ".test.ts",
-        ".spec.ts",
-        ".test.tsx",
-        ".spec.tsx",
-        ".test.js",
-        ".spec.js",
-        ".test.jsx",
-        ".spec.jsx",
-        "_test.py",
-        "Test.java",
-        "Tests.java",
-        "Test.kt",
-        "Tests.kt",
-        "_spec.rb",
-        "Test.cs",
-        "Tests.cs",
-    ];
-
-    if TEST_DIR_PREFIXES.iter().any(|p| path.starts_with(p)) {
-        return true;
-    }
-    if TEST_DIR_SUBSTRINGS.iter().any(|p| path.contains(p)) {
-        return true;
-    }
-    let Some(name) = path.rsplit('/').next() else {
-        return false;
-    };
-    if TEST_FILE_EXACT.contains(&name) {
-        return true;
-    }
-    if TEST_FILE_SUFFIXES.iter().any(|s| name.ends_with(s)) {
-        return true;
-    }
-    name.starts_with("test_") && name.ends_with(".py")
+    crate::test_paths::is_test_path(path)
 }
 
 /// Returns true if the Rust source at `path` contains inline test markers

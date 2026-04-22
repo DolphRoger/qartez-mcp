@@ -651,10 +651,15 @@ pub(super) struct SoulClonesParams {
     #[serde(default, deserialize_with = "flexible::u32_opt")]
     pub offset: Option<u32>,
     #[schemars(
-        description = "Minimum number of source lines for a symbol to be considered (default: 5). Filters out trivial getters."
+        description = "Minimum number of source lines for a symbol to be considered (default: 8). Filters out trivial getters and short dispatch boilerplate. Pass `min_lines=5` for a more aggressive scan that also surfaces small near-duplicates."
     )]
     #[serde(default, deserialize_with = "flexible::u32_opt")]
     pub min_lines: Option<u32>,
+    #[schemars(
+        description = "If true, include test/spec files and inline `#[cfg(test)]` modules in the scan (default: false). Parallel parser-fixture tests share AST shapes by design; excluding them keeps the report focused on production-code refactor candidates."
+    )]
+    #[serde(default, deserialize_with = "flexible::bool_opt")]
+    pub include_tests: Option<bool>,
     #[schemars(
         description = "'concise' = compact list, 'detailed' (default) = grouped output with file paths and line ranges"
     )]

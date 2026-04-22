@@ -2341,6 +2341,267 @@ fn test_security_scan_noise_reduction_end_to_end() {
     );
 }
 
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_line_points_at_match_not_symbol_header() {
+    // Regression: previously `Finding.line_start` was always the enclosing
+    // symbol's first line (the `fn` header), while `snippet` was the
+    // match line. The table row and the snippet pointed at different
+    // places, so the finding could not be navigated from the report. The
+    // fix computes the real match line by counting newlines within the
+    // symbol body and surfaces it as both `line_start` and `line_end`.
+    //
+    // Fixture: a 10-line function where the only Command::new is on line
+    // 8. The enclosing fn header is on line 2, so an old-behavior report
+    // would print `Line 2` with the snippet showing L8. The new report
+    // must print `Line 8`.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    // Craft the file so the fn spans lines 1-10 and the Command::new call
+    // lands on line 8. Each `\n` advances one line; the first line is 1.
+    let body = "// Leading comment\n\
+                pub fn run_something(exec_path: &str) {\n    \
+                let mut acc = Vec::new();\n    \
+                acc.push(1);\n    \
+                acc.push(2);\n    \
+                acc.push(3);\n    \
+                // next line spawns the process\n    \
+                let _ = std::process::Command::new(exec_path)\n        \
+                .arg(\"--help\")\n        \
+                .output();\n\
+                }\n";
+    fs::write(src.join("run.rs"), body).unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name(
+            "qartez_security",
+            json!({ "min_severity": "high", "limit": 50 }),
+        )
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("command-injection"),
+        "expected SEC004 finding, got:\n{result}"
+    );
+
+    // Verify the Line column shows 8 (the Command::new match line) rather
+    // than 2 (the fn header line). The concise table row ends with the
+    // line number as its last column.
+    let has_line_8 = result
+        .lines()
+        .any(|l| l.contains("command-injection") && l.trim_end().ends_with(" 8"));
+    assert!(
+        has_line_8,
+        "Line column must point at the Command::new match line (8), got:\n{result}"
+    );
+
+    // Verify the snippet block cites `run.rs:8`, not `run.rs:2`.
+    assert!(
+        result.contains("run.rs:8"),
+        "snippet header must cite the match line (run.rs:8), got:\n{result}"
+    );
+    assert!(
+        !result.contains("run.rs:2"),
+        "snippet header must NOT cite the fn header line (run.rs:2), got:\n{result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_line_points_at_real_match_when_allowlisted_precedes() {
+    // Edge case for the line-at-match fix: a function body contains TWO
+    // `Command::new` occurrences. The earlier one is `Command::new("git")`
+    // - a static literal on a non-shell binary, which the SEC004
+    // allowlist correctly suppresses. The later one is
+    // `Command::new(dyn_path)` - a dynamic, flagged finding.
+    //
+    // The finding-existence check iterates match positions and asks "is
+    // there any non-static match?". The per-line snippet/line extractor
+    // must also skip allowlisted matches; otherwise the report surfaces
+    // the `git` literal's line while claiming there's an injection, which
+    // is misdirection worse than the original fn-header bug. The
+    // finding's `line_start` and snippet must both point at the dynamic
+    // call, not the earlier allowlisted one.
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    // Line layout:
+    //   1: pub fn spawn_stuff(dyn_path: &str) {
+    //   2:     // static literal - allowlisted
+    //   3:     let _ = std::process::Command::new("git").arg("log").output();
+    //   4:     let mut acc = Vec::new();
+    //   5:     acc.push(1);
+    //   6:     acc.push(2);
+    //   7:     // dynamic - REAL finding
+    //   8:     let _ = std::process::Command::new(dyn_path).arg("--help").output();
+    //   9: }
+    let body = "pub fn spawn_stuff(dyn_path: &str) {\n    \
+                // static literal - allowlisted\n    \
+                let _ = std::process::Command::new(\"git\").arg(\"log\").output();\n    \
+                let mut acc = Vec::new();\n    \
+                acc.push(1);\n    \
+                acc.push(2);\n    \
+                // dynamic - REAL finding\n    \
+                let _ = std::process::Command::new(dyn_path).arg(\"--help\").output();\n\
+                }\n";
+    fs::write(src.join("run.rs"), body).unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name(
+            "qartez_security",
+            json!({ "min_severity": "high", "limit": 50 }),
+        )
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("command-injection"),
+        "expected SEC004 finding for dyn_path, got:\n{result}"
+    );
+
+    // The snippet should cite the dynamic call's line (8), NOT the
+    // allowlisted static-git line (3).
+    assert!(
+        result.contains("run.rs:8"),
+        "snippet should cite the dynamic Command::new line (8), got:\n{result}"
+    );
+    assert!(
+        !result.contains("run.rs:3"),
+        "snippet must not cite the allowlisted static-git line (3), got:\n{result}"
+    );
+
+    // Line column must be 8, not 3 or 1.
+    let has_line_8 = result
+        .lines()
+        .any(|l| l.contains("command-injection") && l.trim_end().ends_with(" 8"));
+    assert!(
+        has_line_8,
+        "Line column must be 8 (the real dyn_path call), got:\n{result}"
+    );
+
+    // Snippet text must contain `dyn_path`, not `\"git\"` literal.
+    assert!(
+        result.contains("dyn_path"),
+        "snippet text should be the dyn_path line, got:\n{result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_line_at_match_snippet_truncation_over_120_chars() {
+    // The snippet extractor truncates lines longer than 120 chars to
+    // `{first 117 chars}...`. Verify:
+    //   * truncation happens with `...` suffix
+    //   * the reported line still points at the correct match line
+    //     (not the enclosing fn header)
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    // Fn header at L1, throwaway line at L2, SEC001 literal >120 chars
+    // on L3, trailer on L4-L5.
+    let long_secret_line = format!(
+        "    let api_key = \"{}\";",
+        "x".repeat(180) // ensures trimmed line exceeds 120 chars
+    );
+    let body = format!(
+        "pub fn load_creds() {{\n    \
+         let _padding = 1;\n\
+         {long_secret_line}\n    \
+         let _ = api_key;\n\
+         }}\n"
+    );
+    fs::write(src.join("creds.rs"), &body).unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name(
+            "qartez_security",
+            json!({ "min_severity": "low", "limit": 50 }),
+        )
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("hardcoded-secret"),
+        "expected SEC001 finding, got:\n{result}"
+    );
+    // Snippet must be truncated with `...`.
+    assert!(
+        result.contains("..."),
+        "snippet should be truncated with ellipsis, got:\n{result}"
+    );
+    // Untruncated 180-char run must not appear.
+    assert!(
+        !result.contains(&"x".repeat(180)),
+        "untruncated 180-char snippet must not appear in output"
+    );
+    // Line column must be 3 (the api_key assignment), not 1 (fn header).
+    assert!(
+        result.contains("creds.rs:3"),
+        "snippet header should cite creds.rs:3, got:\n{result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn test_security_scan_line_at_match_last_line_of_symbol() {
+    // A match on the symbol's very last statement line must be reported
+    // with the correct line number (not saturating back to the header).
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    // Fn spans L1-L5; dynamic Command::new on a real shell is on L4.
+    let body = "pub fn tail_match(x: &str) {\n    \
+                let a = 1;\n    \
+                let b = 2;\n    \
+                let _ = std::process::Command::new(\"sh\").arg(\"-c\").arg(format!(\"echo {}\", x)).output();\n\
+                }\n";
+    fs::write(src.join("tail.rs"), body).unwrap();
+
+    let conn = setup();
+    index::full_index(&conn, dir.path(), false).unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 300);
+    let result = server
+        .call_tool_by_name(
+            "qartez_security",
+            json!({ "min_severity": "high", "limit": 50 }),
+        )
+        .expect("qartez_security dispatch");
+
+    assert!(
+        result.contains("command-injection"),
+        "dynamic sh + format! must be flagged, got:\n{result}"
+    );
+    assert!(
+        result.contains("tail.rs:4"),
+        "snippet header should cite line 4, got:\n{result}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // qartez_smells: end-to-end integration tests
 // ---------------------------------------------------------------------------
@@ -2707,6 +2968,191 @@ fn smells_file_path_scoping() {
     assert!(
         !result.contains("do_adaptation"),
         "should not find adapter.rs symbols, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn smells_feature_envy_ignores_associated_function_calls() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    // Target type `Bar` with only an associated function `new` (no self param).
+    let file_bar = insert_file(&conn, "src/bar.rs");
+    let bar_syms = write::insert_symbols(
+        &conn,
+        file_bar,
+        &[SymbolInsert {
+            name: "new".into(),
+            kind: "method".into(),
+            line_start: 1,
+            line_end: 5,
+            signature: Some("fn new(name: &str) -> Bar".into()),
+            is_exported: true,
+            complexity: Some(1),
+            owner_type: Some("Bar".into()),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let bar_new_id = bar_syms[0];
+
+    // Calling method on `Foo` that constructs Bars via `Bar::new` 5 times.
+    let file_foo = insert_file(&conn, "src/foo.rs");
+    let foo_syms = write::insert_symbols(
+        &conn,
+        file_foo,
+        &[
+            SymbolInsert {
+                name: "build_many".into(),
+                kind: "method".into(),
+                line_start: 1,
+                line_end: 20,
+                signature: Some("fn build_many(&self)".into()),
+                is_exported: true,
+                complexity: Some(3),
+                owner_type: Some("Foo".into()),
+                ..Default::default()
+            },
+            SymbolInsert {
+                name: "foo_helper".into(),
+                kind: "method".into(),
+                line_start: 22,
+                line_end: 25,
+                signature: Some("fn foo_helper(&self)".into()),
+                is_exported: false,
+                complexity: Some(1),
+                owner_type: Some("Foo".into()),
+                ..Default::default()
+            },
+        ],
+    )
+    .unwrap();
+    let build_many_id = foo_syms[0];
+    let foo_helper_id = foo_syms[1];
+
+    // build_many "calls" Bar::new 5 times and Foo's own helper once. Without
+    // the associated-function filter, ratio would be 5.0 and `build_many`
+    // would be flagged; with the filter those calls are skipped.
+    // Note: symbol_refs UNIQUE(from,to,kind) collapses duplicates, but a
+    // single associated-function call is enough to prove it gets filtered.
+    write::insert_symbol_refs(
+        &conn,
+        &[
+            (build_many_id, bar_new_id, "call"),
+            (build_many_id, foo_helper_id, "call"),
+        ],
+    )
+    .unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+    let result = server
+        .call_tool_by_name("qartez_smells", json!({"kind": "feature_envy"}))
+        .expect("qartez_smells should succeed");
+
+    assert!(
+        !result.contains("build_many"),
+        "associated-function calls (Bar::new) should not trigger feature envy, got: {result}"
+    );
+}
+
+#[cfg(feature = "benchmark")]
+#[test]
+fn smells_feature_envy_still_flags_instance_method_calls() {
+    use qartez_mcp::server::QartezServer;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let conn = setup();
+
+    // Target type `Bar` exposes three &self methods.
+    let file_bar = insert_file(&conn, "src/bar.rs");
+    let bar_syms = write::insert_symbols(
+        &conn,
+        file_bar,
+        &[
+            SymbolInsert {
+                name: "do_a".into(),
+                kind: "method".into(),
+                line_start: 1,
+                line_end: 3,
+                signature: Some("fn do_a(&self)".into()),
+                is_exported: true,
+                complexity: Some(1),
+                owner_type: Some("Bar".into()),
+                ..Default::default()
+            },
+            SymbolInsert {
+                name: "do_b".into(),
+                kind: "method".into(),
+                line_start: 5,
+                line_end: 7,
+                signature: Some("fn do_b(&self)".into()),
+                is_exported: true,
+                complexity: Some(1),
+                owner_type: Some("Bar".into()),
+                ..Default::default()
+            },
+            SymbolInsert {
+                name: "do_c".into(),
+                kind: "method".into(),
+                line_start: 9,
+                line_end: 11,
+                signature: Some("fn do_c(&self)".into()),
+                is_exported: true,
+                complexity: Some(1),
+                owner_type: Some("Bar".into()),
+                ..Default::default()
+            },
+        ],
+    )
+    .unwrap();
+
+    // Method `Foo::envy_bar` calls all three `Bar` &self methods, no own calls.
+    let file_foo = insert_file(&conn, "src/foo.rs");
+    let foo_syms = write::insert_symbols(
+        &conn,
+        file_foo,
+        &[SymbolInsert {
+            name: "envy_bar".into(),
+            kind: "method".into(),
+            line_start: 1,
+            line_end: 20,
+            signature: Some("fn envy_bar(&self, b: &Bar)".into()),
+            is_exported: true,
+            complexity: Some(2),
+            owner_type: Some("Foo".into()),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let envy_bar_id = foo_syms[0];
+
+    write::insert_symbol_refs(
+        &conn,
+        &[
+            (envy_bar_id, bar_syms[0], "call"),
+            (envy_bar_id, bar_syms[1], "call"),
+            (envy_bar_id, bar_syms[2], "call"),
+        ],
+    )
+    .unwrap();
+
+    let server = QartezServer::new(conn, dir.path().to_path_buf(), 0);
+    let result = server
+        .call_tool_by_name("qartez_smells", json!({"kind": "feature_envy"}))
+        .expect("qartez_smells should succeed");
+
+    assert!(
+        result.contains("envy_bar"),
+        "3 &self-method calls on a foreign type should still flag envy, got: {result}"
+    );
+    assert!(
+        result.contains("Bar"),
+        "envied type should appear in output, got: {result}"
     );
 }
 

@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::storage::models::SymbolRow;
 use crate::storage::read;
+use crate::test_paths::is_test_path;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -164,8 +165,14 @@ pub fn builtin_rules() -> Vec<SecurityRule> {
             name: "command-injection".into(),
             severity: Severity::High,
             category: "injection".into(),
+            // `subprocess[.(]` covers Python's `subprocess.run(...)` /
+            // `subprocess.Popen(...)` without catching Rust identifiers
+            // like `run_judge_subprocess` that merely contain the word.
+            // Before tightening, every function whose name ended in
+            // `_subprocess` self-matched and produced a bogus High-severity
+            // finding.
             pattern: SecurityPattern::BodyRegex(
-                r"(?i)(Command::new|subprocess|os\.system|exec\(|eval\()".into(),
+                r"(?i)(Command::new|\bsubprocess[.(]|os\.system|exec\(|eval\()".into(),
             ),
             description: "Shell command or eval with potential untrusted input.".into(),
             languages: None,
@@ -350,31 +357,17 @@ pub fn compute_risk_score(severity: Severity, pagerank: f64, is_exported: bool) 
 // Scanner
 // ---------------------------------------------------------------------------
 
-/// Returns true for paths that look like test/spec files.
-///
-/// A virtual leading `/` is prepended before substring matching so a
-/// top-level `tests/foo.rs` is recognised the same way as `src/tests/foo.rs`.
-/// Without that, the directory-prefixed patterns (`/tests/`, `/test_`,
-/// `/spec/`) would only fire when the test directory had a parent.
-fn is_test_path(path: &str) -> bool {
-    let normalized = format!("/{}", path.trim_start_matches('/'));
-    normalized.contains("/tests/")
-        || normalized.contains("/test_")
-        || normalized.contains("_test.")
-        || normalized.contains("/spec/")
-        || normalized.contains("_spec.")
-        || normalized.contains(".test.")
-        || normalized.contains(".spec.")
-}
-
 /// Find Rust `#[cfg(test)]` module blocks inside a source file. Returns
 /// inclusive 1-based line ranges spanning each block, including the
 /// attribute line itself.
 ///
-/// Used to suppress security findings produced inside inline test modules
+/// Used to suppress findings produced inside inline test modules
 /// (e.g. `#[cfg(test)] mod tests { ... }` in production source files) when
 /// the caller asked to skip tests but `is_test_path` did not match because
-/// the host file lives outside the conventional test directories.
+/// the host file lives outside the conventional test directories. Shared
+/// with the clone detector so `qartez_clones` can exclude duplicate test
+/// fixtures by default - parallel-shaped parser tests inside inline
+/// `#[cfg(test)] mod tests {}` blocks are low-signal refactor targets.
 ///
 /// Parses with `tree-sitter-rust` so the result is robust against
 /// multi-line strings, raw strings, byte strings, block comments, and
@@ -383,7 +376,7 @@ fn is_test_path(path: &str) -> bool {
 /// linked) the function returns an empty vector, which means findings
 /// inside test modules continue to surface as before; it never hides
 /// findings outside test modules.
-fn find_cfg_test_blocks(source: &str) -> Vec<(u32, u32)> {
+pub(crate) fn find_cfg_test_blocks(source: &str) -> Vec<(u32, u32)> {
     use tree_sitter::{Language, Parser};
 
     let mut parser = Parser::new();
@@ -604,6 +597,14 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
                             cr.regex
                                 .find_iter(&body)
                                 .any(|m| !is_sec004_static_command(m.as_str(), &body, m.start()))
+                        } else if body_match && cr.rule.id == "SEC005" {
+                            cr.regex
+                                .find_iter(&body)
+                                .any(|m| !is_sec005_benign(&body, m.start()))
+                        } else if body_match && cr.rule.id == "SEC008" {
+                            cr.regex
+                                .find_iter(&body)
+                                .any(|m| !is_sec008_benign(&body, m.start()))
                         } else {
                             body_match
                         }
@@ -619,19 +620,67 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
                     continue;
                 }
 
-                let snippet = if matches!(&cr.rule.pattern, SecurityPattern::BodyRegex(_)) {
-                    body.lines().find(|line| cr.regex.is_match(line)).map(|l| {
-                        let trimmed = l.trim();
-                        if trimmed.len() > 120 {
-                            // Truncate by char count to avoid panicking on multi-byte UTF-8.
-                            format!("{}...", trimmed.chars().take(117).collect::<String>())
-                        } else {
-                            trimmed.to_string()
+                // For body-regex rules, locate the actual offending line so
+                // both `line_start` and `snippet` point at the same place.
+                // Without this, the finding's `line_start` was the enclosing
+                // symbol's start (e.g. the `fn` header) while `snippet` was
+                // pulled from the match line, so the table row and the
+                // snippet told the reader to look in different places.
+                //
+                // Applies the SAME rule-specific allowlist that the outer
+                // `matched` check uses. A function with an allowlisted
+                // `Command::new("git")` followed by a real
+                // `Command::new(user_input)` would otherwise surface the
+                // allowlisted line - the rule fired because of the SECOND
+                // match but the report pointed at the first one. Iterate
+                // over `find_iter(&body)` and skip allowlisted match
+                // positions; the first survivor is the real finding.
+                let (match_line, snippet) =
+                    if matches!(&cr.rule.pattern, SecurityPattern::BodyRegex(_)) {
+                        let chosen_pos = cr
+                            .regex
+                            .find_iter(&body)
+                            .find(|m| match cr.rule.id.as_str() {
+                                "SEC001" => !is_sec001_env_indirection(m.as_str()),
+                                "SEC004" => !is_sec004_static_command(m.as_str(), &body, m.start()),
+                                "SEC005" => !is_sec005_benign(&body, m.start()),
+                                "SEC007" => !is_sec007_benign(m.as_str(), &body, m.start()),
+                                "SEC008" => !is_sec008_benign(&body, m.start()),
+                                _ => true,
+                            })
+                            .map(|m| m.start());
+                        match chosen_pos {
+                            Some(pos) => {
+                                // Convert byte offset into body to a
+                                // 1-based file line number.
+                                let line_index = body[..pos].matches('\n').count() as u32;
+                                let line_no = sym.line_start.saturating_add(line_index);
+                                // Extract the full source line containing
+                                // `pos` (back to previous `\n`, forward
+                                // to next `\n`).
+                                let line_start_byte =
+                                    body[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                                let line_end_byte = body[pos..]
+                                    .find('\n')
+                                    .map(|i| pos + i)
+                                    .unwrap_or(body.len());
+                                let line = &body[line_start_byte..line_end_byte];
+                                let trimmed = line.trim();
+                                let text = if trimmed.len() > 120 {
+                                    format!("{}...", trimmed.chars().take(117).collect::<String>())
+                                } else {
+                                    trimmed.to_string()
+                                };
+                                (Some(line_no), Some(text))
+                            }
+                            None => (None, None),
                         }
-                    })
-                } else {
-                    None
-                };
+                    } else {
+                        (None, None)
+                    };
+
+                let line_start = match_line.unwrap_or(sym.line_start);
+                let line_end = match_line.unwrap_or(sym.line_end);
 
                 findings.push(Finding {
                     rule_id: cr.rule.id.clone(),
@@ -640,8 +689,8 @@ pub fn scan(conn: &Connection, rules: &[SecurityRule], opts: &ScanOptions) -> Ve
                     category: cr.rule.category.clone(),
                     file_path: (*rel_path).to_string(),
                     symbol_name: sym.name.clone(),
-                    line_start: sym.line_start,
-                    line_end: sym.line_end,
+                    line_start,
+                    line_end,
                     pagerank: pr,
                     risk_score: compute_risk_score(cr.rule.severity, pr, sym.is_exported),
                     snippet,
@@ -743,10 +792,11 @@ fn is_sec001_env_indirection(snippet: &str) -> bool {
 }
 
 /// SEC004 allowlist: returns `true` when the match is a `Command::new("LIT")`
-/// invocation whose executable is a string literal AND the surrounding
-/// `.args(...)` chain contains no `format!` / `&` interpolation. Static
-/// commands like `Command::new("git").args(["rev-parse", "HEAD"])` cannot
-/// inject arbitrary shells; only interpolated args are dangerous.
+/// invocation whose executable is a string literal AND the `.args(...)`
+/// chain that follows contains no `format!` / `String::from` / `.to_string()`
+/// interpolation. Static commands like `Command::new("git").args(["rev-parse",
+/// "HEAD"])` cannot inject arbitrary shells; only interpolated args are
+/// dangerous.
 fn is_sec004_static_command(matched: &str, body: &str, match_start: usize) -> bool {
     if !matched.starts_with("Command::new") {
         return false;
@@ -757,20 +807,121 @@ fn is_sec004_static_command(matched: &str, body: &str, match_start: usize) -> bo
         None => return false,
     };
     let exec = exec_lit.trim();
-    let is_string_literal = exec.len() >= 2
-        && (exec.starts_with('"') && exec.ends_with('"'))
-        && !exec[1..exec.len() - 1].contains('{');
-    if !is_string_literal {
+    let is_quoted_string = exec.len() >= 2 && exec.starts_with('"') && exec.ends_with('"');
+    let quoted_has_brace = is_quoted_string && exec[1..exec.len() - 1].contains('{');
+    if quoted_has_brace {
+        // Quoted exec literal with `{` inside (`Command::new("script-{version}")`)
+        // looks like a template slated for runtime substitution. Static analysis
+        // cannot tell whether the substitution is sanitized, so flag
+        // conservatively - this path is separate from both the safe-literal and
+        // non-literal branches below.
         return false;
     }
-    // Inspect the next ~512 bytes of method chain (typical builder length).
-    // If the chain interpolates via `format!`, raw `&str` concat, or `+`,
-    // treat it as dynamic. The 512-byte window is large enough to cover
-    // the longest builder call we have in-tree (~300 bytes) but small
-    // enough that a downstream `format!(` in unrelated code does not
-    // poison the verdict.
+    let is_string_literal = is_quoted_string;
+
+    // Compute the bounded, depth-aware tail window once. The same cutoff
+    // is reused for both the literal-shell interpolation check and the
+    // non-literal shell-mode-flag scan. Scope to the end of this
+    // statement/expression: track paren/bracket depth (skipping chars
+    // inside `"..."` strings so a `"echo {}"` literal doesn't confuse the
+    // depth counter) and stop at the first `;` or `{` at depth 0. That
+    // covers both
+    //   * `Command::new(...).output()?;` (statement terminator), and
+    //   * `if let Ok(x) = Command::new(...).output() { ... }` (block start).
+    // A 512-byte cap remains as a safety net for pathological multi-line
+    // builders that exceed what we would ever realistically inspect.
     let tail_end = (after.len()).min(512);
-    let tail = &after[..tail_end];
+    let tail_window = &after[..tail_end];
+    let stmt_end = {
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut end = tail_window.len();
+        for (i, c) in tail_window.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if in_string {
+                match c {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                ';' | '{' if depth <= 0 => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        end
+    };
+    let tail = &tail_window[..stmt_end];
+
+    if !is_string_literal {
+        // Non-literal executable (variable, path, expression). In Rust,
+        // `Command::new(x).arg(y).arg(z)` is argv exec via posix_spawn /
+        // CreateProcessW - it does NOT invoke a shell, so each `.arg()`
+        // is an independent argv entry and cannot be shell-injected.
+        // Shell injection is only possible when the binary IS a shell AND
+        // a subsequent `.arg()` contains user-controlled interpolation
+        // (e.g. `Command::new(sh).arg("-c").arg(format!("echo {x}"))`).
+        //
+        // Detect that specific shape by looking for an inline-command
+        // flag literal (`-c`, `/c`, `-Command`, `-C`) passed to `.arg()`
+        // within the same statement window. Absence of such a flag means
+        // argv exec - safe, regardless of how the executable was chosen.
+        let has_shell_flag = tail.contains(r#".arg("-c")"#)
+            || tail.contains(r#".arg("/c")"#)
+            || tail.contains(r#".arg("-Command")"#)
+            || tail.contains(r#".arg("-C")"#);
+        return !has_shell_flag;
+    }
+
+    // `Command::new(...)` + `.arg(...)` does NOT invoke a shell: each arg is
+    // passed as a separate argv entry via posix_spawn (or CreateProcessW on
+    // Windows), so a dynamic `.arg()` on a non-shell command cannot shell-
+    // inject. The interpolation check only needs to fire when the command
+    // IS a shell (`sh -c "<payload>"` style). For everything else -
+    // `git`, `cargo`, `curl`, `make`, `ffmpeg`, ... - dynamic args are
+    // bounded to that one program's argv and are the program's concern,
+    // not a shell-injection vector.
+    //
+    // Strip the surrounding quotes and take the path basename so
+    // `/bin/sh` and `C:\Windows\System32\cmd.exe` still classify correctly.
+    let cmd_name = &exec[1..exec.len() - 1];
+    let base_name = cmd_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(cmd_name)
+        .to_ascii_lowercase();
+    let is_shell = matches!(
+        base_name.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "cmd"
+            | "cmd.exe"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+    );
+    if !is_shell {
+        return true;
+    }
+
+    // Shell command: interpolation in the args CAN become a payload, so the
+    // tail check stays.
     if tail.contains("format!(")
         || tail.contains("&format!")
         || tail.contains(".to_string()")
@@ -779,6 +930,114 @@ fn is_sec004_static_command(matched: &str, body: &str, match_start: usize) -> bo
         return false;
     }
     true
+}
+
+/// SEC005 allowlist: returns `true` when the `../` match is a compile-time
+/// embed (`include_str!("../...")`, `include_bytes!(...)`, `concat!(...)`) or
+/// a path-shape *check* (`.starts_with("../")`, `.contains("../")`,
+/// `.ends_with("../")`) rather than a runtime filesystem operation.
+///
+/// Looks at the ~120 bytes before the match, which comfortably covers the
+/// opening macro name and the string quote even on indented continuation
+/// lines.
+fn is_sec005_benign(body: &str, match_start: usize) -> bool {
+    let mut lookback_start = match_start.saturating_sub(120);
+    while lookback_start < match_start && !body.is_char_boundary(lookback_start) {
+        lookback_start += 1;
+    }
+    let prefix = &body[lookback_start..match_start];
+
+    // Compile-time embeds: content is resolved against the source file's
+    // directory at build time and does not flow into any filesystem call at
+    // runtime. `concat!` is a constant-folding macro and so is equally
+    // harmless when its argument happens to contain `../`.
+    const EMBED_MARKERS: &[&str] = &[
+        "include_str!(\"",
+        "include_str!(r\"",
+        "include_bytes!(\"",
+        "include_bytes!(r\"",
+        "concat!(\"",
+    ];
+    for marker in EMBED_MARKERS {
+        if let Some(pos) = prefix.rfind(marker) {
+            // Require that the macro call is still open between the marker
+            // and the match (no intervening `)` has closed it). Avoids
+            // treating a later `../` in the same line as part of a completed
+            // `include_str!()`.
+            let after_marker = &prefix[pos + marker.len()..];
+            if !after_marker.contains(')') {
+                return true;
+            }
+        }
+    }
+
+    // Path-shape detection rather than path *use*: `if path.starts_with("../")
+    // { ... }` is the code rejecting traversal, not performing it. Same for
+    // `.contains("../")` guards and `.ends_with("/..")` sanity checks.
+    const CHECK_MARKERS: &[&str] = &[
+        ".starts_with(\"",
+        ".contains(\"",
+        ".ends_with(\"",
+        ".split(\"",
+        ".split_terminator(\"",
+    ];
+    for marker in CHECK_MARKERS {
+        if let Some(pos) = prefix.rfind(marker) {
+            let after_marker = &prefix[pos + marker.len()..];
+            if !after_marker.contains(')') {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// SEC008 allowlist: returns `true` when the `unsafe` token is embedded in a
+/// string literal or `//` comment on its own line. The SEC008 regex uses
+/// `\bunsafe\b` and so also matches the word "unsafe" inside descriptive
+/// strings like `.expect("FTS-unsafe chars ...")` or schema
+/// `description = "... 'unsafe' ..."`, which have nothing to do with Rust's
+/// `unsafe {}` construct.
+fn is_sec008_benign(body: &str, match_start: usize) -> bool {
+    // Locate the line containing the match.
+    let line_start = body[..match_start].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let line_end = body[match_start..]
+        .find('\n')
+        .map(|p| match_start + p)
+        .unwrap_or(body.len());
+    let pos_in_line = match_start - line_start;
+    let line = &body[line_start..line_end];
+
+    // `//` line comment before the match wins: the keyword cannot execute
+    // inside a comment.
+    if let Some(comment_pos) = line.find("//")
+        && comment_pos < pos_in_line
+    {
+        return true;
+    }
+
+    // Scan from the start of the line up to the match, tracking whether we
+    // are inside a `"..."` string literal. Escaped quotes (`\"`) and raw
+    // strings (`r"..."` / `r#"..."#`) are both handled: for raw strings the
+    // `r` prefix does not break the quote-counting invariant because the
+    // *outer* delimiters are still `"`, and the only way `unsafe` ends up
+    // between them is as literal text, which is exactly what we want to
+    // skip.
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in line[..pos_in_line].chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            _ => {}
+        }
+    }
+    in_string
 }
 
 /// Resolve a relative index path to an absolute path using the project roots.
@@ -975,6 +1234,31 @@ mod tests {
     }
 
     #[test]
+    fn sec004_regex_does_not_match_rust_identifier_containing_subprocess() {
+        // Previously the `subprocess` alternation matched anywhere - so
+        // Rust function names like `run_judge_subprocess` and any caller
+        // referencing them flipped the whole rule on. The tightened
+        // `\bsubprocess[.(]` requires either `subprocess.` (module
+        // access) or `subprocess(` (call), which is the only shape
+        // Python's stdlib actually uses.
+        let rule = builtin_rules()
+            .into_iter()
+            .find(|r| r.id == "SEC004")
+            .expect("SEC004 rule");
+        let pattern = pattern_str(&rule);
+        // Identifiers that merely contain the word must not match.
+        check_regex(pattern, "fn run_judge_subprocess(prompt: &str)", false);
+        check_regex(
+            pattern,
+            "let raw = run_judge_subprocess(prompt, model);",
+            false,
+        );
+        // Real Python subprocess calls still match.
+        check_regex(pattern, "import subprocess; subprocess.run(['ls'])", true);
+        check_regex(pattern, "subprocess.Popen(['rm', path])", true);
+    }
+
+    #[test]
     fn sec004_skips_static_command() {
         // Static `Command::new("git").args([...static literals...])` is safe.
         let body =
@@ -988,10 +1272,256 @@ mod tests {
         let start = body.find(m).unwrap();
         assert!(!is_sec004_static_command(m, body, start));
 
-        // Variable executable (not a literal) is still suspicious.
+        // Variable executable without a shell-mode flag is argv exec,
+        // not shell injection - each `.arg()` is an independent argv
+        // entry via posix_spawn / CreateProcessW.
         let body = r#"Command::new(&cmd[0]).args(args).output()"#;
         let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_ignores_string_work_after_statement_terminator() {
+        // Regression: the top finding in the self-scan report used to be
+        // `git_sha()` in benchmark/mod.rs, because the Command builder ends
+        // with `.output().ok()?;` and the very next statement builds a
+        // string via `String::from_utf8_lossy(...).to_string()`. The old
+        // 512-byte tail window scooped up that `.to_string()` and flagged
+        // the whole call as dynamic. Stopping at `;` keeps each Command
+        // invocation self-scoped.
+        let body = r#"let out = Command::new("git").args(["rev-parse", "HEAD"]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();"#;
+        let m = "Command::new";
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec005_skips_include_str_embeds() {
+        // `include_str!("../foo")` is a compile-time embed. The `../` is a
+        // path relative to the source file, not a runtime filesystem op, and
+        // the scanner must not treat it as path traversal.
+        let body = r#"const SKILL_MD: &str = include_str!("../../scripts/skill/SKILL.md");"#;
+        let start = body.find("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+
+        // `include_bytes!` and `concat!` are equally harmless.
+        let body = r#"const X: &[u8] = include_bytes!("../../assets/logo.png");"#;
+        let start = body.find("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+
+        let body = r#"const P: &str = concat!("../", "scripts");"#;
+        let start = body.find("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+    }
+
+    #[test]
+    fn sec005_skips_path_shape_checks() {
+        // `path.starts_with("../")` is the code REJECTING traversal, not
+        // performing it. Same for `.contains("../")` and `.ends_with("../")`.
+        let body = r#"if path.starts_with("./") || path.starts_with("../") { return Err(...); }"#;
+        let start = body.rfind("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+
+        let body = r#"if rel.contains("../") { return Err("traversal"); }"#;
+        let start = body.find("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+    }
+
+    #[test]
+    fn sec005_flags_real_traversal() {
+        // A `../` inside a genuine filesystem call remains suspicious.
+        let body = r#"let p = format!("../{}", name); fs::read_to_string(&p)?;"#;
+        let start = body.find("../").unwrap();
+        assert!(!is_sec005_benign(body, start));
+
+        let body = r#"fs::File::open("../../etc/passwd")?;"#;
+        let start = body.find("../").unwrap();
+        assert!(!is_sec005_benign(body, start));
+    }
+
+    #[test]
+    fn sec008_skips_unsafe_in_string_literal() {
+        // "unsafe" appearing as a word inside a string literal is data, not
+        // Rust's `unsafe {}` construct. Both of these used to fire SEC008.
+        let body =
+            r#"description = "Filter by category: 'secrets', 'injection', 'unsafe', 'info-leak'.""#;
+        let start = body.find("unsafe").unwrap();
+        assert!(is_sec008_benign(body, start));
+
+        let body = r#"input.process().expect("FTS-unsafe chars must not error out");"#;
+        let start = body.find("unsafe").unwrap();
+        assert!(is_sec008_benign(body, start));
+    }
+
+    #[test]
+    fn sec008_skips_unsafe_in_line_comment() {
+        // `// unsafe:` discussions in code comments shouldn't fire either.
+        let body = "let x = 1; // unsafe would be bad here, so we avoid it";
+        let start = body.find("unsafe").unwrap();
+        assert!(is_sec008_benign(body, start));
+    }
+
+    #[test]
+    fn sec008_flags_actual_unsafe_block() {
+        // Real unsafe blocks still fire.
+        let body = "fn foo() { unsafe { std::mem::transmute(0) } }";
+        let start = body.find("unsafe").unwrap();
+        assert!(!is_sec008_benign(body, start));
+
+        let body = "pub unsafe fn bar() {}";
+        let start = body.find("unsafe").unwrap();
+        assert!(!is_sec008_benign(body, start));
+    }
+
+    // =========================================================================
+    // Edge cases added during post-fix verification.
+    // =========================================================================
+
+    #[test]
+    fn sec005_benign_does_not_leak_past_closed_macro() {
+        // A `../` AFTER a closed `include_str!(...)` call must still be
+        // flagged. Otherwise the benign window would trivially match any
+        // file that contains any `include_str!` anywhere earlier.
+        let body =
+            r#"const A: &str = include_str!("safe.md"); let p = "../secrets"; fs::open(p)?;"#;
+        let start = body.find("../").unwrap();
+        assert!(
+            !is_sec005_benign(body, start),
+            "match must be flagged when include_str! is already closed"
+        );
+    }
+
+    #[test]
+    fn sec005_benign_does_not_leak_past_closed_check() {
+        // A `../` in a genuine filesystem call must not be saved by an
+        // unrelated earlier `.starts_with("/")` on a different variable.
+        let body = r#"if name.starts_with("/") { return; } fs::open("../etc/passwd")?;"#;
+        let start = body.find("../").unwrap();
+        assert!(
+            !is_sec005_benign(body, start),
+            "completed starts_with check must not save an unrelated open()"
+        );
+    }
+
+    #[test]
+    fn sec005_benign_handles_raw_string_include() {
+        // `include_str!(r"../foo")` is equally a compile-time embed. The
+        // `r` prefix changes escape handling but not the benign verdict.
+        let body = r##"const X: &str = include_str!(r"../../scripts/a.md");"##;
+        let start = body.find("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+    }
+
+    #[test]
+    fn sec005_benign_handles_utf8_in_preamble() {
+        // The lookback walks to the nearest char boundary so a multi-byte
+        // character in the surrounding text cannot panic the slice.
+        let body = "// комментарий с кириллицей: ../\nlet p = include_str!(\"../../dir/file.md\");";
+        let start = body.rfind("../").unwrap();
+        assert!(is_sec005_benign(body, start));
+    }
+
+    #[test]
+    fn sec008_benign_handles_escaped_quote_in_string() {
+        // `"he said \"unsafe\""` - the word is inside a single string with
+        // embedded escaped quotes. The toggle-on-each-quote logic must not
+        // treat the escaped `\"` as closing the string.
+        let body = r#"let msg = "he said \"unsafe\" is bad";"#;
+        let start = body.find("unsafe").unwrap();
+        assert!(
+            is_sec008_benign(body, start),
+            "escaped quotes must not toggle string state"
+        );
+    }
+
+    #[test]
+    fn sec008_benign_multiple_strings_on_one_line() {
+        // `let msg = "unsafe"; let also = "bar";` - only the word in the
+        // first string is data. The line-scoped scanner must correctly
+        // track that the first string closed before the second opened.
+        let body = r#"let msg = "unsafe"; let also = "bar";"#;
+        let start = body.find("unsafe").unwrap();
+        assert!(is_sec008_benign(body, start));
+    }
+
+    #[test]
+    fn sec008_flags_unsafe_after_closed_string() {
+        // `let msg = "hello"; unsafe { ... }` - the `unsafe` after the
+        // closed string is Rust syntax, not data.
+        let body = r#"let msg = "hello"; unsafe { std::mem::transmute::<_, ()>(()) }"#;
+        let start = body.find("unsafe").unwrap();
+        assert!(!is_sec008_benign(body, start));
+    }
+
+    #[test]
+    fn sec008_benign_multiline_body_tracks_line_boundaries() {
+        // The scanner joins a symbol's lines with `\n` and passes the
+        // joined body. The per-line string-state must reset at each
+        // newline so a string opened on line N does not swallow a keyword
+        // on line N+1.
+        let body = "fn a() {\n    let s = \"hi\";\n}\nfn b() {\n    unsafe { x() }\n}";
+        let start = body.find("unsafe").unwrap();
+        assert!(
+            !is_sec008_benign(body, start),
+            "string scope must not cross lines"
+        );
+    }
+
+    #[test]
+    fn sec004_static_command_with_env_chain_is_safe() {
+        // `Command::new("git").env("LANG", "C").args(["log"]).output();` is
+        // the shape of most trusted builders in-tree. No format!, no
+        // String::from - must be classified static.
+        let body = r#"Command::new("git").env("LANG", "C").args(["log", "-1"]).output()?;"#;
+        let m = "Command::new";
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_static_command_dynamic_env_stays_flagged() {
+        // A `format!` inside the chain and BEFORE the `;` is still dynamic
+        // and must stay flagged. The cutoff only suppresses interpolation
+        // after the builder's statement.
+        let body = r#"Command::new("sh").env("PATH", format!("/bin:{}", extra)).output()?;"#;
+        let m = "Command::new";
+        let start = body.find(m).unwrap();
         assert!(!is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_static_command_in_if_let_scrutinee_is_safe() {
+        // `if let Ok(x) = Command::new(...).output() { body }` - the
+        // builder expression ends at `{`, not at a `;`. The post-fix
+        // depth-tracking cutoff must recognise the opening brace as the
+        // builder boundary so `.to_string()` calls INSIDE the if-let body
+        // don't leak into the static/dynamic verdict.
+        let body = r#"if let Ok(output) = Command::new("git")
+        .args(["config", "--global", "core.excludesfile"])
+        .output()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Some(s);
+    }"#;
+        let m = "Command::new";
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_static_command_depth_tracking_handles_string_with_braces() {
+        // `.arg("echo {}")` - the `{` and `}` are inside a string literal
+        // and must not be counted as depth-modifiers, otherwise the cutoff
+        // would fire prematurely and a real `format!(` later in the chain
+        // would be missed.
+        let body = r#"Command::new("sh").arg("echo {}").arg(format!("{}", x)).output()?;"#;
+        let m = "Command::new";
+        let start = body.find(m).unwrap();
+        assert!(
+            !is_sec004_static_command(m, body, start),
+            "format! in a later arg must still flip the verdict to dynamic"
+        );
     }
 
     #[test]
@@ -1076,8 +1606,9 @@ mod tests {
 
     #[test]
     fn sec004_static_command_handles_string_from() {
-        // `String::from(format!(...))` and `arg.to_string()` are also
-        // dynamic and must NOT be skipped.
+        // `String::from(format!(...))` and `arg.to_string()` feeding a SHELL
+        // command are dynamic and must be flagged - they can become `sh -c`
+        // payloads.
         let m = "Command::new";
         let body = r#"Command::new("sh").arg(String::from(user_input)).output()"#;
         let start = body.find(m).unwrap();
@@ -1086,8 +1617,51 @@ mod tests {
         let body = r#"Command::new("sh").arg(user_input.to_string()).output()"#;
         let start = body.find(m).unwrap();
         assert!(!is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_static_command_non_shell_with_dynamic_arg_is_safe() {
+        // A non-shell command with a dynamic arg is NOT a shell-injection
+        // vector: `Command::new("git").arg(format!("-n{limit}"))` passes
+        // the formatted string as a single argv entry to git, it never
+        // reaches a shell. Same for cargo/curl/make/ffmpeg/etc. CLI-option
+        // injection (e.g. `--upload-pack=evil`) is a distinct class of bug
+        // and is not what SEC004 targets.
+        let m = "Command::new";
+
+        let body = r#"Command::new("git").arg(format!("-n{limit}")).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new("cargo").arg(format!("--target={target}")).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
 
         let body = r#"Command::new("git").arg(&format!("--{flag}", flag = f)).output()"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+
+        let body =
+            r#"Command::new("git").arg("-n").arg(limit.to_string()).map_err(|e| e.to_string())"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_static_shell_command_with_path_prefix_is_detected() {
+        // `/bin/sh`, `/usr/bin/bash`, and `C:\Windows\System32\cmd.exe`
+        // should still classify as shells for the interpolation check.
+        let m = "Command::new";
+
+        let body = r#"Command::new("/bin/sh").arg("-c").arg(format!("echo {x}"))"#;
+        let start = body.find(m).unwrap();
+        assert!(!is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new("/usr/bin/bash").arg("-c").arg(format!("ls {path}"))"#;
+        let start = body.find(m).unwrap();
+        assert!(!is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new("cmd.exe").arg("/C").arg(format!("dir {d}"))"#;
         let start = body.find(m).unwrap();
         assert!(!is_sec004_static_command(m, body, start));
     }
@@ -1123,6 +1697,65 @@ mod tests {
         );
         let start = body.find(m).unwrap();
         assert!(is_sec004_static_command(m, &body, start));
+    }
+
+    #[test]
+    fn sec004_non_literal_exec_without_shell_flag_is_safe() {
+        // `Command::new(variable).arg(subcommand)` is argv exec, not
+        // shell. Without a `.arg("-c")`-style inline-command flag the
+        // executable cannot shell-inject, regardless of whether the
+        // executable path was chosen at compile time or discovered at
+        // runtime.
+        let m = "Command::new";
+
+        let body = r#"Command::new(&cmd[0]).arg("subcommand").output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new(&setup).arg("doctor").status()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new(&binary).args(&["--port", &port]).spawn()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_non_literal_exec_with_shell_flag_stays_flagged() {
+        // When the tail contains an inline-command flag (`-c`, `/c`,
+        // `-Command`, `-C`) the executable is being used as a shell and
+        // interpolated args become a genuine injection vector, even
+        // though the executable itself is a variable.
+        let m = "Command::new";
+
+        let body = r#"Command::new(&shell).arg("-c").arg(format!("echo {cmd}")).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(!is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new(shell_path).arg("/c").arg(format!("dir {path}")).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(!is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new(&ps).arg("-Command").arg(format!("Get-Item {p}")).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(!is_sec004_static_command(m, body, start));
+    }
+
+    #[test]
+    fn sec004_non_literal_exec_with_mixed_variable_args_is_safe() {
+        // A path variable + static flag + another variable arg is still
+        // argv exec: each entry lands in a distinct argv slot, no shell
+        // parses the result.
+        let m = "Command::new";
+
+        let body = r#"Command::new(path_var).arg("--flag").arg(arg_var).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
+
+        let body = r#"Command::new(&cmd[0]).args(&cmd[1..]).output()?;"#;
+        let start = body.find(m).unwrap();
+        assert!(is_sec004_static_command(m, body, start));
     }
 
     #[test]
@@ -1244,26 +1877,19 @@ mod tests {
 
     #[test]
     fn test_path_detection() {
-        // With preceding directory.
+        // Quick smoke-check that the shared predicate routes through; the
+        // exhaustive cases live in `crate::test_paths::tests`.
         assert!(is_test_path("src/tests/foo.rs"));
-        assert!(is_test_path("src/test_helper.py"));
-        assert!(is_test_path("src/spec/foo.rb"));
-        // Top-level test directories or test-prefixed files (this is the
-        // CLI-from-project-root case that used to slip through).
         assert!(is_test_path("tests/foo.rs"));
-        assert!(is_test_path("test_helper.py"));
-        assert!(is_test_path("spec/foo.rb"));
-        // Leading slash should be normalised away, not double-counted.
         assert!(is_test_path("/tests/foo.rs"));
-        // Filename-suffix patterns work anywhere.
         assert!(is_test_path("foo_test.go"));
         assert!(is_test_path("foo.test.ts"));
-        assert!(is_test_path("foo.spec.js"));
-        // Negative cases.
+        // Regression guard for the bug this file's old narrow predicate had:
+        // `_tests.` (plural) was never checked, so external `#[cfg(test)] mod
+        // quality_tests;` modules leaked into the main report.
+        assert!(is_test_path("src/server/quality_tests.rs"));
         assert!(!is_test_path("src/server/mod.rs"));
         assert!(!is_test_path("attests/foo.rs"));
-        assert!(!is_test_path("respec/foo.rb"));
-        assert!(!is_test_path(""));
     }
 
     #[test]

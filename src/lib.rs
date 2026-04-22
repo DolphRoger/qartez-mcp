@@ -9,6 +9,7 @@ pub mod index;
 pub mod server;
 pub mod storage;
 pub(crate) mod str_utils;
+pub(crate) mod test_paths;
 pub mod toolchain;
 pub mod watch;
 

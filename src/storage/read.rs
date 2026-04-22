@@ -534,7 +534,16 @@ pub fn get_exported_symbols_not_imported(conn: &Connection) -> Result<Vec<(Symbo
     get_unused_exports_page(conn, i64::MAX, 0)
 }
 
-/// Count distinct clone groups (shape hashes shared by 2+ symbols).
+/// Count distinct clone groups (shape hashes shared by 2+ symbols at
+/// DISTINCT physical line ranges).
+///
+/// A shape_hash that's shared only across symbols at the SAME physical
+/// `(file_id, line_start, line_end)` is NOT a clone - it's one piece of
+/// source code that happened to be multi-indexed. The typical trigger is
+/// a CSS comma-selector list (`.a, .b, .c { ... }`) where each entry
+/// becomes its own symbol at the same line range. Counting DISTINCT
+/// `(file_id, line_start, line_end)` per hash suppresses those phantom
+/// groups without hiding legitimate structural duplicates across files.
 pub fn count_clone_groups(conn: &Connection, min_lines: u32) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM (
@@ -542,7 +551,7 @@ pub fn count_clone_groups(conn: &Connection, min_lines: u32) -> Result<i64> {
              WHERE shape_hash IS NOT NULL
                AND (line_end - line_start + 1) >= ?1
              GROUP BY shape_hash
-             HAVING COUNT(*) >= 2
+             HAVING COUNT(DISTINCT file_id || ':' || line_start || ':' || line_end) >= 2
          )",
         [min_lines],
         |row| row.get(0),
@@ -557,6 +566,11 @@ pub struct CloneGroup {
 }
 
 /// Return clone groups ordered by group size (largest first), with pagination.
+///
+/// Applies the same `(file_id, line_start, line_end)` dedup rule as
+/// [`count_clone_groups`]: multi-indexed symbols at the same physical
+/// span count once, and groups that collapse below the 2-member threshold
+/// are dropped from the page.
 pub fn get_clone_groups(
     conn: &Connection,
     min_lines: u32,
@@ -564,7 +578,9 @@ pub fn get_clone_groups(
     offset: i64,
 ) -> Result<Vec<CloneGroup>> {
     let mut hash_stmt = conn.prepare(
-        "SELECT shape_hash, COUNT(*) as cnt FROM symbols
+        "SELECT shape_hash,
+                COUNT(DISTINCT file_id || ':' || line_start || ':' || line_end) as cnt
+         FROM symbols
          WHERE shape_hash IS NOT NULL
            AND (line_end - line_start + 1) >= ?1
          GROUP BY shape_hash
@@ -591,11 +607,19 @@ pub fn get_clone_groups(
 
     let mut groups = Vec::with_capacity(hashes.len());
     for (hash, _cnt) in &hashes {
-        let syms: Vec<(SymbolRow, FileRow)> = members_stmt
+        let raw: Vec<(SymbolRow, FileRow)> = members_stmt
             .query_map([hash], |row| {
                 Ok((row_to_symbol(row)?, row_to_file_joined(row)?))
             })?
             .filter_map(|r| r.ok())
+            .collect();
+        // Keep one representative per physical `(file_id, line_start,
+        // line_end)` span. SQL's ORDER BY (f.path, s.line_start) makes
+        // the representative stable across runs.
+        let mut seen: std::collections::HashSet<(i64, u32, u32)> = std::collections::HashSet::new();
+        let syms: Vec<(SymbolRow, FileRow)> = raw
+            .into_iter()
+            .filter(|(sym, _)| seen.insert((sym.file_id, sym.line_start, sym.line_end)))
             .collect();
         groups.push(CloneGroup {
             shape_hash: hash.clone(),

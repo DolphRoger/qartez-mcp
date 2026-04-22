@@ -184,9 +184,35 @@ fn cli_calls_runs() {
 #[test]
 fn cli_clones_runs() {
     let (_dir, config) = make_project();
-    let cmd = Command::Clones;
+    let cmd = Command::Clones {
+        min_lines: None,
+        limit: None,
+        offset: None,
+        include_tests: false,
+    };
     let result = cli_runner::run(&config, &cmd, OutputFormat::Compact);
     assert!(result.is_ok(), "clones failed: {:?}", result.err());
+}
+
+#[test]
+fn cli_clones_accepts_min_lines_limit_offset() {
+    // Regression: `qartez clones --min-lines 5 --limit 3 --offset 1`
+    // used to fail with "unexpected argument" even though the MCP tool
+    // accepted those fields. The CLI and the MCP surface must stay in
+    // lockstep so local CLI use gives the same affordances as the server.
+    let (_dir, config) = make_project();
+    let cmd = Command::Clones {
+        min_lines: Some(5),
+        limit: Some(3),
+        offset: Some(1),
+        include_tests: true,
+    };
+    let result = cli_runner::run(&config, &cmd, OutputFormat::Compact);
+    assert!(
+        result.is_ok(),
+        "clones with paging args failed: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -210,9 +236,40 @@ fn cli_hierarchy_runs() {
 #[test]
 fn cli_security_runs() {
     let (_dir, config) = make_project();
-    let cmd = Command::Security;
+    let cmd = Command::Security {
+        severity: None,
+        category: None,
+        file: None,
+        include_tests: false,
+        limit: None,
+        offset: None,
+        config_path: None,
+    };
     let result = cli_runner::run(&config, &cmd, OutputFormat::Compact);
     assert!(result.is_ok(), "security failed: {:?}", result.err());
+}
+
+#[test]
+fn cli_security_accepts_full_filter_set() {
+    // Regression: the CLI `Security` subcommand used to take no arguments
+    // while the MCP surface accepted severity, category, file, and paging
+    // filters. Exercise all of them to keep the variants locked.
+    let (_dir, config) = make_project();
+    let cmd = Command::Security {
+        severity: Some("medium".into()),
+        category: Some("injection".into()),
+        file: Some("src".into()),
+        include_tests: true,
+        limit: Some(10),
+        offset: Some(0),
+        config_path: None,
+    };
+    let result = cli_runner::run(&config, &cmd, OutputFormat::Compact);
+    assert!(
+        result.is_ok(),
+        "security with full filter set failed: {:?}",
+        result.err()
+    );
 }
 
 #[test]
