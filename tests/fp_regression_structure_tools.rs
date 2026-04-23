@@ -254,11 +254,21 @@ fn selftest_wiki_write_to_absolute_path_is_honored() {
 #[test]
 fn selftest_wiki_write_to_absolute_missing_parent_is_rejected() {
     let server = build_server();
+    // Build an absolute path whose parent does not exist, without
+    // baking in a Unix-style literal like `/foo/bar`. On Windows
+    // `Path::is_absolute()` requires a drive letter, so a bare
+    // leading-slash path would fall through to the relative branch
+    // and surface a different error. `TempDir::path()` is absolute
+    // on every platform; joining a non-existent subdirectory keeps
+    // the "parent missing" invariant the test asserts.
+    let tmp = TempDir::new().unwrap();
+    let missing = tmp
+        .path()
+        .join("__nonexistent_parent_9823742")
+        .join("wiki.md");
+    let missing_str = missing.to_string_lossy().into_owned();
     let err = server
-        .call_tool_by_name(
-            "qartez_wiki",
-            json!({ "write_to": "/__nonexistent_parent_9823742/wiki.md" }),
-        )
+        .call_tool_by_name("qartez_wiki", json!({ "write_to": missing_str }))
         .expect_err("missing parent directory must fail");
     assert!(
         err.contains("does not exist"),

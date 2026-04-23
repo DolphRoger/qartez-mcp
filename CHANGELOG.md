@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.3] - 2026-04-23
+
+### Fixed
+
+- **`selftest_wiki_write_to_absolute_missing_parent_is_rejected` is cross-platform** - the regression test baked in the Unix-style literal `/__nonexistent_parent_9823742/wiki.md`, but `Path::is_absolute()` on Windows requires a drive letter, so the path fell through to the relative branch of `resolve_write_target` and surfaced a different error. The Windows-only CI job for v0.9.2 went red while macOS and Linux stayed green. The test now builds the path from `TempDir::path()` (absolute on every platform) joined with a non-existent subdirectory, so the "parent missing" invariant holds without any platform-specific literal.
+
 ## [0.9.2] - 2026-04-23
 
 ### Fixed
