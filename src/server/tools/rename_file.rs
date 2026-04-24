@@ -157,7 +157,15 @@ impl QartezServer {
         // blind during preview.
         let parent_mod_importer: Option<String> = if old_rel_stem != new_rel_stem {
             find_parent_mod_file(&self.project_root, &params.from).and_then(|p| {
-                let rel = p.to_string_lossy().to_string();
+                // The rest of the repo treats relative paths with forward
+                // slashes (index rows, `use` import stems, caller-facing
+                // previews). `PathBuf::to_string_lossy` preserves the OS
+                // separator, so on Windows `p` ends up as `src/index\mod.rs`
+                // when `find_parent_mod_file` joined the parent directory
+                // to a `mod.rs` basename. Normalise to `/` so preview
+                // output matches the format the rest of the tool surface
+                // uses - and the Windows CI assertion that broke v0.9.4.
+                let rel = p.to_string_lossy().replace('\\', "/");
                 let abs = self.project_root.join(&p);
                 match std::fs::read_to_string(&abs) {
                     Ok(content) => {

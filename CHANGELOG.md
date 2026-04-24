@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.5] - 2026-04-24
+
+### Fixed
+
+- **`qartez_rename_file` preview no longer leaks Windows backslashes in the parent-mod importer path** - on Windows the parent-mod lookup rendered `src/index\mod.rs` (forward slashes from the input combined with an OS-native backslash from `PathBuf::join`), which broke the `rename_file_preview_lists_parent_mod_as_importer` assertion and red-tagged the v0.9.4 release. The preview now normalises `\` to `/` so all callers receive the repo-canonical forward-slash form regardless of platform.
+- **CI resilience against transient ONNX-runtime CDN failures** - `ort-sys` fetches prebuilt ONNX Runtime binaries from `cdn.pyke.io` during `--all-features` build scripts. The CDN returned HTTP 504 on the v0.9.4 ubuntu-stable job and red-tagged the release even though the code was sound. A new `scripts/ci-retry.sh` wrapper now retries the `cargo clippy` and `cargo doc` workflow steps up to 3 times with exponential backoff, but ONLY when stderr shows a transient-network signature (5xx HTTP status, DNS failure, connection reset, timeout). Deterministic failures (clippy lints, compile errors) still surface on the first attempt.
+- **`scripts/prerelease.sh` gained a Windows path-separator leak lint** - any `to_string_lossy()` call in `src/server/` without a visible `'\\' → '/'` normalisation in the same file is now surfaced as a warning so the v0.9.4 class of bug is caught locally before tagging.
+
 ## [0.9.4] - 2026-04-24
 
 ### Fixed
